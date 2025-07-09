@@ -1,7 +1,7 @@
-# streams_directory: "./config/streams/streams_anemoi/"
+streams_directory: "./config/streams/streams_anemoi/"
 # streams_directory: "./config/streams/era5_sfc"
 # streams_directory: "./config/streams/streams_anemoi_era5_split/"
-streams_directory: "/p/scratch/hclimrep/shared/weather_generator_data/anemoi/"
+# streams_directory: "/p/scratch/hclimrep/shared/weather_generator_data/anemoi/"
 
 embed_orientation: "channels"
 embed_local_coords: True
