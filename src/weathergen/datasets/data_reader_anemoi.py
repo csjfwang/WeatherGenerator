@@ -222,45 +222,61 @@ class DataReaderAnemoi(DataReaderTimestep):
         channels = self.stream_info.get(ch_type)
         channels_exclude = self.stream_info.get(ch_type + "_exclude", [])
 
+        levels = self.stream_info.get('levels')
+        level_every = self.stream_info.get('level_every')
+
         # sanity check
         not_empty = len(channels) > 0 if channels is not None else True
         assert not_empty, "channels are empty; at least one channels must be present."
 
-        def check_reduce(k, factor):
+        def get_level(k):
             """
             Check if `k' has levels. 
-            If yes, check if divisible by `factor'.
+            If yes, check if `k-1' divisible by `factor'.
             If not, return True.
             """
             if k[-1].isdigit():
-                num = 0
+                level = 0
                 for i in range(1,len(k)):
                     if k[-i].isdigit():
-                        num += (10 ** (i-1)) * int(k[-i])
-                    else:
-                        break
-                print(num)
-                return num % factor == 0
+                        level += (10 ** (i-1)) * int(k[-i])
             else:
-                return True
+                level = None
+            return level
+        
+        def check_level(k):
+            level = get_level(k)
+            if level is None or (levels is not None and level in levels):
+                    return True
+            else:
+                return (level - 1) % level_every == 0
 
-        chs_idx = np.sort(
-            [
-                ds0.name_to_index[k]
-                for (k, v) in ds0.typed_variables.items()
-                if (
-                    #exclude some levels to reduce dimensionality
-                    check_reduce(k, 6)
-                    ###
+        
+        def keep_kv(k,v):
+            assert channels is None or channels_exclude is None, 'Either specify channels to include or to exclude, not both'
+            
+            if channels is None and channels_exclude is None:
+                if (not np.array([f in k for f in channels_exclude]).any()
                     and not v.is_computed_forcing
-                    and not v.is_constant_in_time
-                    and (
-                        np.array([f in k for f in channels]).any() if channels is not None else True
-                    )
-                    and not np.array([f in k for f in channels_exclude]).any()
-                )
-            ]
-        )
+                    and not v.is_constant_in_time):
+                        return check_level(k)
+            elif channels_exclude is None and channels is not None:
+                if (np.array([f in k for f in channels]).any()
+                    and not v.is_computed_forcing
+                    and not v.is_constant_in_time):
+                        return check_level(k)
+            elif not v.is_computed_forcing and not v.is_constant_in_time:
+                return check_level(k)           
+            return False
+            
+        if channels_exclude is not None:
+            chs_idx = np.sort(
+                [
+                    ds0.name_to_index[k]
+                    for (k, v) in ds0.typed_variables.items()
+                    if keep_kv(k,v)
+                ]
+            )
         return chs_idx
 
 
