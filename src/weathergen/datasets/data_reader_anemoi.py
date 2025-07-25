@@ -221,16 +221,38 @@ class DataReaderAnemoi(DataReaderTimestep):
 
         channels = self.stream_info.get(ch_type)
         channels_exclude = self.stream_info.get(ch_type + "_exclude", [])
+
         # sanity check
         not_empty = len(channels) > 0 if channels is not None else True
         assert not_empty, "channels are empty; at least one channels must be present."
+
+        def check_reduce(k, factor):
+            """
+            Check if `k' has levels. 
+            If yes, check if divisible by `factor'.
+            If not, return True.
+            """
+            if k[-1].isdigit():
+                num = 0
+                for i in range(1,len(k)):
+                    if k[-i].isdigit():
+                        num += (10 ** (i-1)) * int(k[-i])
+                    else:
+                        break
+                print(num)
+                return num % factor == 0
+            else:
+                return True
 
         chs_idx = np.sort(
             [
                 ds0.name_to_index[k]
                 for (k, v) in ds0.typed_variables.items()
                 if (
-                    not v.is_computed_forcing
+                    #exclude some levels to reduce dimensionality
+                    check_reduce(k, 6)
+                    ###
+                    and not v.is_computed_forcing
                     and not v.is_constant_in_time
                     and (
                         np.array([f in k for f in channels]).any() if channels is not None else True
@@ -239,9 +261,7 @@ class DataReaderAnemoi(DataReaderTimestep):
                 )
             ]
         )
-
-        # return chs_idx
-        return chs_idx[::6]
+        return chs_idx
 
 
 def _clip_lat(lats: NDArray) -> NDArray[np.float32]:
