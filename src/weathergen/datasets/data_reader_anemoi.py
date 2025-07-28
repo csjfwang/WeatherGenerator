@@ -222,7 +222,7 @@ class DataReaderAnemoi(DataReaderTimestep):
         """
 
         channels = self.stream_info.get(ch_type)
-        channels_exclude = self.stream_info.get(ch_type + "_exclude", [])
+        channels_exclude = self.stream_info.get(ch_type + "_exclude")
 
         levels = self.stream_info.get('levels')
         level_every = self.stream_info.get('level_every')
@@ -255,6 +255,8 @@ class DataReaderAnemoi(DataReaderTimestep):
 
         
         def keep_kv(k,v):
+            
+
             assert channels is None or channels_exclude is None, 'Either specify channels to include or to exclude, not both'
             
             if channels is None and channels_exclude is not None:
@@ -271,14 +273,14 @@ class DataReaderAnemoi(DataReaderTimestep):
                 return check_level(k)           
             return False
             
-        if channels_exclude is not None:
-            chs_idx = np.sort(
-                [
-                    ds0.name_to_index[k]
-                    for (k, v) in ds0.typed_variables.items()
-                    if keep_kv(k,v)
-                ]
-            )
+        chs_idx = np.sort(
+            [
+                ds0.name_to_index[k]
+                for (k, v) in ds0.typed_variables.items()
+                if keep_kv(k,v)
+            ]
+        )
+
         return chs_idx
 
 
