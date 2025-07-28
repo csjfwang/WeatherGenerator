@@ -117,6 +117,8 @@ class DataReaderAnemoi(DataReaderTimestep):
         _logger.info(f"{ds_name}: target channels: {self.target_channels}")
         _logger.info(f"{ds_name}: geoinfo channels: {self.geoinfo_channels}")
 
+        exit()
+
         self.properties = {
             "stream_id": 0,
         }
@@ -255,7 +257,7 @@ class DataReaderAnemoi(DataReaderTimestep):
         def keep_kv(k,v):
             assert channels is None or channels_exclude is None, 'Either specify channels to include or to exclude, not both'
             
-            if channels is None and channels_exclude is None:
+            if channels is None and channels_exclude is not None:
                 if (not np.array([f in k for f in channels_exclude]).any()
                     and not v.is_computed_forcing
                     and not v.is_constant_in_time):
