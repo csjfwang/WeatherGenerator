@@ -117,8 +117,6 @@ class DataReaderAnemoi(DataReaderTimestep):
         _logger.info(f"{ds_name}: target channels: {self.target_channels}")
         _logger.info(f"{ds_name}: geoinfo channels: {self.geoinfo_channels}")
 
-        exit()
-
         self.properties = {
             "stream_id": 0,
         }
@@ -225,7 +223,7 @@ class DataReaderAnemoi(DataReaderTimestep):
         channels_exclude = self.stream_info.get(ch_type + "_exclude")
 
         levels = self.stream_info.get('levels')
-        level_every = self.stream_info.get('level_every')
+        level_every = self.stream_info.get('level_every', 1)
 
         # sanity check
         not_empty = len(channels) > 0 if channels is not None else True
