@@ -117,6 +117,8 @@ class DataReaderAnemoi(DataReaderTimestep):
         _logger.info(f"{ds_name}: target channels: {self.target_channels}")
         _logger.info(f"{ds_name}: geoinfo channels: {self.geoinfo_channels}")
 
+        exit()
+
         self.properties = {
             "stream_id": 0,
         }
@@ -222,8 +224,8 @@ class DataReaderAnemoi(DataReaderTimestep):
         channels = self.stream_info.get(ch_type)
         channels_exclude = self.stream_info.get(ch_type + "_exclude")
 
-        levels = self.stream_info.get('levels')
-        level_every = self.stream_info.get('level_every', 1)
+        levels = self.stream_info.get(ch_type + "_levels")
+        level_every = self.stream_info.get(ch_type + "_level_every", None)
 
         # sanity check
         not_empty = len(channels) > 0 if channels is not None else True
@@ -247,28 +249,31 @@ class DataReaderAnemoi(DataReaderTimestep):
         def check_level(k):
             level = get_level(k)
             if level is None or (levels is not None and level in levels):
-                    return True
+                return True
+            if level_every is None:
+                return False
             else:
                 return (level - 1) % level_every == 0
 
         
         def keep_kv(k,v):
             
-
             assert channels is None or channels_exclude is None, 'Either specify channels to include or to exclude, not both'
             
-            if channels is None and channels_exclude is not None:
-                if (not np.array([f in k for f in channels_exclude]).any()
-                    and not v.is_computed_forcing
-                    and not v.is_constant_in_time):
+            if not v.is_computed_forcing and not v.is_constant_in_time:
+                if channels is None and channels_exclude is not None:
+                    if k in channels_exclude:
+                        return False
+                    if not np.array([f in k for f in channels_exclude if not f[-1].isdigit()]).any():
                         return check_level(k)
-            elif channels_exclude is None and channels is not None:
-                if (np.array([f in k for f in channels]).any()
-                    and not v.is_computed_forcing
-                    and not v.is_constant_in_time):
-                        return check_level(k)
-            elif not v.is_computed_forcing and not v.is_constant_in_time:
-                return check_level(k)           
+                elif channels_exclude is None and channels is not None:
+                    if k in channels:
+                        return True
+                    if np.array([f in k for f in channels if not f[-1].isdigit()]).any():
+                            return check_level(k)
+                else:
+                    return check_level(k)
+      
             return False
             
         chs_idx = np.sort(
