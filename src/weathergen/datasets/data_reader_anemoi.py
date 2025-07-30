@@ -117,7 +117,7 @@ class DataReaderAnemoi(DataReaderTimestep):
         _logger.info(f"{ds_name}: target channels: {self.target_channels}")
         _logger.info(f"{ds_name}: geoinfo channels: {self.geoinfo_channels}")
 
-        exit()
+        # exit()
 
         self.properties = {
             "stream_id": 0,
