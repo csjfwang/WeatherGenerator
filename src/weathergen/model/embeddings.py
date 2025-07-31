@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from weathergen.model.attention import MultiSelfAttentionHead, MultiCrossAttentionHead
+from weathergen.model.attention import MultiCrossAttentionHead, MultiSelfAttentionHead
 from weathergen.model.layers import MLP
 
 # from weathergen.model.mlp import MLP
@@ -43,6 +43,7 @@ class PerceiverBlock(torch.nn.Module):
         x = self.mlp(x)
         return x
 
+
 class StreamEmbedTransformer(torch.nn.Module):
     def __init__(
         self,
@@ -54,7 +55,8 @@ class StreamEmbedTransformer(torch.nn.Module):
         dim_out,
         num_blocks,
         num_heads,
-        cross_attn_params,
+        use_perceiver=False,
+        cross_attn_params=None,
         norm_type="LayerNorm",
         embed_size_centroids=64,
         unembed_mode="full",
@@ -77,29 +79,30 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.dim_embed = dim_embed
         self.dim_out = dim_out
         self.num_blocks = num_blocks
-        if cross_attn_params is not None:
+        self.use_perceiver = use_perceiver
+
+        if self.use_perceiver:
             assert mode == "channels", "cross-attention is only supported in channels mode"
-            
-            self.num_queries = cross_attn_params.get("num_queries", 0) if cross_attn_params else 0
-            self.selu = torch.nn.SELU(inplace=True)
-            if self.num_queries > 0:
-            # Multi-Cross Attention Head
-                num_channels = self.num_queries
-                self.cross_attn_num_blocks = cross_attn_params.get("num_blocks", 1) if cross_attn_params else 1
-                self.cross_attn_num_heads = cross_attn_params.get("num_heads", 1) if cross_attn_params else 1
-                self.queries = torch.nn.Parameter(
-                torch.randn(1, self.num_queries, self.dim_embed) 
+            assert cross_attn_params is not None, (
+                "cross_attn_params must be provided when use_perceiver=True"
             )
-                with torch.no_grad():
-                    self.queries.normal_(mean=0.0, std=1.0 / np.sqrt(self.dim_embed))
-                self.perceiver_io = PerceiverBlock(self.dim_embed, self.cross_attn_num_heads)
-            else:
-                self.perceiver_io = torch.nn.Identity()
+
+            self.num_queries = cross_attn_params["num_queries"]
+            self.cross_attn_num_heads = cross_attn_params["num_heads"]
+            self.selu = torch.nn.SELU(inplace=True)
+
+            num_channels = self.num_queries
+            self.queries = torch.nn.Parameter(
+                torch.normal(
+                    mean=0.0,
+                    std=1.0 / np.sqrt(self.dim_embed),
+                    size=(1, self.num_queries, self.dim_embed),
+                )
+            )
+            self.perceiver_io = PerceiverBlock(self.dim_embed, self.cross_attn_num_heads)
         else:
-            self.num_queries = 0
             self.selu = torch.nn.Identity()
 
-        
         self.num_heads = num_heads
         self.embed_size_centroids = embed_size_centroids
         self.unembed_mode = unembed_mode
@@ -190,20 +193,21 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.embed_centroids = torch.nn.Linear(5, embed_size_centroids)
 
     def forward_channels(self, x_in, centroids):
+        # x_in: (num_healpix, num_tokens_per_healpix, num_channels)
         peh = positional_encoding_harmonic
 
         # embed provided input data
+        # x : (num_healpix, num_channels, dim_embed)
         x = peh(self.selu(checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False)))
 
-
-        if self.num_queries > 0:
+        if self.use_perceiver:
             # cross-attention with queries
-            x = checkpoint(self.perceiver_io, 
-                self.queries.repeat(x.shape[0],1,1),
+            x = checkpoint(
+                self.perceiver_io,
+                self.queries.repeat(x.shape[0], 1, 1),
                 x,
                 use_reentrant=False,
             )
-
 
         for layer in self.layers:
             x = checkpoint(layer, x, use_reentrant=False)
