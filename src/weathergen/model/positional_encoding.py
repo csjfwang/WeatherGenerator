@@ -31,6 +31,42 @@ def positional_encoding_harmonic(x):
 
     return x
 
+####################################################################################################
+def positional_encoding_harmonic_13(x):
+    """space time harmonic positional encoding"""
+
+    dim_embed = x.shape[-1]
+    dev = x.device
+
+    len_token_seq = 13
+    pe = torch.zeros(len_token_seq, dim_embed, device=dev)
+    position = torch.arange(0, len_token_seq).unsqueeze(1)
+    div = torch.exp(torch.arange(0, dim_embed, 2) * -(math.log(10000) / dim_embed))
+
+    pe[:, 0::2] = torch.sin(position * div[: pe[:, 0::2].shape[1]])
+    pe[:, 1::2] = torch.cos(position * div[: pe[:, 1::2].shape[1]])
+    x = x + pe
+
+    return x
+
+####################################################################################################
+def positional_encoding_harmonic_6(x):
+    """space time harmonic positional encoding"""
+
+    dim_embed = x.shape[-1]
+    dev = x.device
+
+    len_token_seq = 6
+    pe = torch.zeros(len_token_seq, dim_embed, device=dev)
+    position = torch.arange(0, len_token_seq).unsqueeze(1)
+    div = torch.exp(torch.arange(0, dim_embed, 2) * -(math.log(10000) / dim_embed))
+
+    pe[:, 0::2] = torch.sin(position * div[: pe[:, 0::2].shape[1]])
+    pe[:, 1::2] = torch.cos(position * div[: pe[:, 1::2].shape[1]])
+    x = x + pe
+
+    return x
+
 
 ####################################################################################################
 def positional_encoding_harmonic_idx(x, s_idx):

@@ -83,35 +83,6 @@ class StreamEmbedTransformer(torch.nn.Module):
                 )
             )
 
-        # WJF:
-        # self.variable_type_embed = torch.nn.Parameter(torch.Tensor(8, self.dim_embed))
-
-        # self.variable_type_embed = torch.nn.Parameter(
-        #         torch.normal(
-        #             mean=0.0,
-        #             std=1.0 / np.sqrt(self.dim_embed),
-        #             size=(8, self.dim_embed),
-        #         )
-        #     )
-
-        self.variable_pos_embed_peh = torch.nn.Parameter(
-                torch.normal(
-                    mean=0.0,
-                    std=1.0 / np.sqrt(self.dim_embed),
-                    size=(79, self.dim_embed),
-                )
-            )
-        
-        self.variable_pos_embed = torch.nn.Parameter(
-                torch.normal(
-                    mean=0.0,
-                    std=1.0 / np.sqrt(self.dim_embed),
-                    size=(16, self.dim_embed),
-                )
-            )
-
-        # END
-
         if mode == "channels":
             self.embed = torch.nn.Linear(self.dim_in, self.dim_embed)
 
@@ -178,46 +149,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         peh = positional_encoding_harmonic
 
         # embed provided input data
-        # x = peh(checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False))
-        x = checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False)
-
-        x += self.variable_pos_embed_peh[:, :].unsqueeze(0)
-
-        # x[:, 3:16] += self.variable_type_embed[0, ]
-        # x[:, 16:29] += self.variable_type_embed[1, ]
-        # x[:, 29:42] += self.variable_type_embed[2, ]
-        # x[:, 42:55] += self.variable_type_embed[3, ]
-        # x[:, 55:68] += self.variable_type_embed[4, ]
-        # x[:, 68:69] += self.variable_type_embed[2, ]
-        # x[:, 69:70] += self.variable_type_embed[3, ]
-        # x[:, 70:71] += self.variable_type_embed[5, ]
-        # x[:, 71:72] += self.variable_type_embed[1, ]
-        # x[:, 72:73] += self.variable_type_embed[6, ]
-        # x[:, 73:74] += self.variable_type_embed[7, ]
-
-        # x[:, 3:16, :]  += self.variable_type_embed[0].view(1, 1, -1)
-        # x[:, 16:29, :] += self.variable_type_embed[1].view(1, 1, -1)
-        # x[:, 29:42, :] += self.variable_type_embed[2].view(1, 1, -1)
-        # x[:, 42:55, :] += self.variable_type_embed[3].view(1, 1, -1)
-        # x[:, 55:68, :] += self.variable_type_embed[4].view(1, 1, -1)
-        # x[:, 68:69, :] += self.variable_type_embed[2].view(1, 1, -1)
-        # x[:, 69:70, :] += self.variable_type_embed[3].view(1, 1, -1)
-        # x[:, 70:71, :] += self.variable_type_embed[5].view(1, 1, -1)
-        # x[:, 71:72, :] += self.variable_type_embed[1].view(1, 1, -1)
-        # x[:, 72:73, :] += self.variable_type_embed[6].view(1, 1, -1)
-        # x[:, 73:74, :] += self.variable_type_embed[7].view(1, 1, -1)
-
-        # x[:, 3:16, :] += self.variable_pos_embed[:13, :].unsqueeze(0)
-        # x[:, 16:29, :] += self.variable_pos_embed[:13, :].unsqueeze(0)
-        # x[:, 29:42, :] += self.variable_pos_embed[:13, :].unsqueeze(0)
-        # x[:, 42:55, :] += self.variable_pos_embed[:13, :].unsqueeze(0)
-        # x[:, 55:68, :] += self.variable_pos_embed[:13, :].unsqueeze(0)
-        # x[:, 68:69, :] += self.variable_pos_embed[13:14, :].unsqueeze(0)
-        # x[:, 69:70, :] += self.variable_pos_embed[13:14, :].unsqueeze(0)
-        # x[:, 70:71, :] += self.variable_pos_embed[14:15, :].unsqueeze(0)
-        # x[:, 71:72, :] += self.variable_pos_embed[14:15, :].unsqueeze(0)
-        # x[:, 72:73, :] += self.variable_pos_embed[15:16, :].unsqueeze(0)
-        # x[:, 73:74, :] += self.variable_pos_embed[15:16, :].unsqueeze(0)
+        x = peh(checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False))
 
         for layer in self.layers:
             x = checkpoint(layer, x, use_reentrant=False)
