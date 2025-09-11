@@ -14,13 +14,13 @@ ERA5 :
   
   # source : ['u_', 'v_', '10u', '10v']
   # target : ['10u', '10v']
-  source_exclude : ['w_', 'skt', 'tcw', 'cp', 'tp'] 
-  target_exclude : ['w_', 'slor', 'sdor', 'tcw', 'cp', 'tp'] 
+  source_exclude : ['w_', 'skt', 'tcw', 'cp', 'tp', 'd_', 'vo_'] 
+  target_exclude : ['w_', 'slor', 'sdor', 'tcw', 'cp', 'tp', 'd_', 'vo_', 'skt'] 
 
-  #temporary variables to reduce datset size
-  source_levels: [48, 60, 68, 74, 79, 83, 90, 95, 100, 105, 114, 120, 133] 
-  target_levels: [48, 60, 68, 74, 79, 83, 90, 95, 100, 105, 114, 120, 133] 
-  source_level_every: 4
+  # temporary variables to reduce datset size
+  # source_levels: [48, 60, 68, 74, 79, 83, 90, 95, 100, 105, 114, 120, 133] 
+  # target_levels: [48, 60, 68, 74, 79, 83, 90, 95, 100, 105, 114, 120, 133] 
+  # source_level_every: 4 
   # target_level_every: 6 
 
   loss_weight : 1.
@@ -35,7 +35,7 @@ ERA5 :
     num_heads : 8
     dim_embed : 256
     num_blocks : 2
-    use_perceiver: True
+    use_perceiver: False
     cross_attention : 
       num_queries : 64 
       num_heads : 8 

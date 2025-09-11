@@ -46,7 +46,7 @@ forecast_steps: 2
 forecast_policy: fixed #fixed
 forecast_freeze_model: False
 forecast_att_dense_rate: 1.0
-fe_num_blocks: 0
+fe_num_blocks: 8
 fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
