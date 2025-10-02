@@ -37,6 +37,8 @@ from weathergen.model.utils import get_num_parameters
 from weathergen.utils.logger import logger
 from weathergen.utils.utils import get_dtype
 
+from weathergen.model.wayformer_utils import PerceiverEncoder, PerceiverDecoder, TrainableQueryProvider
+
 
 class ModelParams(torch.nn.Module):
     """Creation of query and embedding parameters of the model."""
@@ -246,7 +248,20 @@ class Model(torch.nn.Module):
 
         ##############
         # global assimilation engine
-        self.ae_global_blocks = GlobalAssimilationEngine(cf, self.num_healpix_cells).create()
+        # self.ae_global_blocks = GlobalAssimilationEngine(cf, self.num_healpix_cells).create()
+        self.perceiver_encoder = PerceiverEncoder(192, cf.ae_global_dim_embed,
+                                                  num_cross_attention_qk_channels=cf.ae_global_dim_embed,
+                                                  num_cross_attention_v_channels=cf.ae_global_dim_embed,
+                                                  num_self_attention_qk_channels=cf.ae_global_dim_embed,
+                                                  num_self_attention_v_channels=cf.ae_global_dim_embed)
+        output_query_provider = TrainableQueryProvider(
+            num_queries=self.num_healpix_cells,
+            num_query_channels=cf.ae_global_dim_embed,
+            init_scale=0.1,
+        )
+
+        self.perceiver_decoder = PerceiverDecoder(output_query_provider, cf.ae_global_dim_embed)
+
 
         ###############
         # forecasting engine
@@ -411,7 +426,8 @@ class Model(torch.nn.Module):
         num_params_embed = [get_num_parameters(embed) for embed in self.embeds]
         num_params_total = get_num_parameters(self)
         num_params_ae_local = get_num_parameters(self.ae_local_blocks)
-        num_params_ae_global = get_num_parameters(self.ae_global_blocks)
+        num_params_ae_global_enc = get_num_parameters(self.perceiver_encoder)
+        num_params_ae_global_dec = get_num_parameters(self.perceiver_decoder)
 
         num_params_q_cells = np.prod(self.q_cells.shape) if self.q_cells.requires_grad else 0
         num_params_ae_adapater = get_num_parameters(self.ae_adapter)
@@ -434,7 +450,8 @@ class Model(torch.nn.Module):
         print(f" Local assimilation engine: {num_params_ae_local:,}")
         print(f" Local-global adapter: {num_params_ae_adapater:,}")
         print(f" Learnable queries: {num_params_q_cells:,}")
-        print(f" Global assimilation engine: {num_params_ae_global:,}")
+        print(f" Global assimilation engine_enc: {num_params_ae_global_enc:,}")
+        print(f" Global assimilation engine_dec: {num_params_ae_global_dec:,}")
         print(f" Forecast engine: {num_params_fe:,}")
         print(" kv-adapter, coordinate embedding, prediction networks and prediction heads:")
         zps = zip(
@@ -516,7 +533,9 @@ class Model(torch.nn.Module):
         # local assimilation engine and adapter
         tokens, posteriors = self.assimilate_local(model_params, tokens, source_cell_lens)
 
-        tokens = self.assimilate_global(model_params, tokens)
+        # tokens = self.assimilate_global(model_params, tokens)
+        tokens = self.perceiver_encoder(tokens)
+        tokens = self.perceiver_decoder(tokens)
 
         # roll-out in latent space
         preds_all = []
