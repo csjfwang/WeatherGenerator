@@ -37,7 +37,7 @@ from weathergen.model.utils import get_num_parameters
 from weathergen.utils.logger import logger
 from weathergen.utils.utils import get_dtype
 
-from weathergen.model.wayformer_utils import PerceiverEncoder, PerceiverDecoder, TrainableQueryProvider
+from weathergen.model.wayfm_utils import PerceiverEncoder, PerceiverDecoder, TrainableQueryProvider
 
 
 class ModelParams(torch.nn.Module):
