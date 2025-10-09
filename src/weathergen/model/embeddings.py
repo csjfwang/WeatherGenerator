@@ -19,6 +19,248 @@ from weathergen.model.norms import RMSNorm
 from weathergen.model.positional_encoding import positional_encoding_harmonic
 
 
+########################################################
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+
+
+class SelectorTransformer(nn.Module):
+    def __init__(self, dim_in, dim_embed, num_blocks=2, num_heads=4, k_max=8, num_ctrl=4):
+        super().__init__()
+        self.dim_in = dim_in
+        self.dim_embed = dim_embed
+        self.num_blocks = num_blocks
+        self.num_heads = num_heads
+        self.k_max = k_max
+        self.num_ctrl = num_ctrl
+
+        # 输入已经是嵌入后的张量，不需要embedding层
+        self.norm = nn.LayerNorm(dim_embed)
+
+        # lightweight transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=dim_embed, nhead=num_heads,
+            dim_feedforward=dim_embed * 2, dropout=0.1
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_blocks)
+
+        # learnable CTRL tokens
+        self.ctrl = nn.Parameter(torch.randn(num_ctrl, dim_embed))
+
+        # scoring MLP
+        self.scorer = nn.Sequential(
+            nn.LayerNorm(dim_embed),
+            nn.Linear(dim_embed, dim_embed),
+            nn.GELU(),
+            nn.Linear(dim_embed, 1)
+        )
+
+    @staticmethod
+    def gumbel_topk_st(logits, k, tau=1.0):
+        """
+        FFS Top-K selection with Gumbel-Max Straight-Through Estimator
+        
+        Args:
+            logits: [B, N] - 原始logits
+            k: int - 要选择的top-k数量
+            tau: float - 温度参数，控制Gumbel噪声的强度
+            
+        Returns:
+            mask: [B, N] - 二进制mask，1表示被选中，0表示未选中
+        """
+        # 1. 添加Gumbel(0,1)噪声到logits
+        U = torch.rand_like(logits)
+        gumbel_noise = -torch.log(-torch.log(U + 1e-9) + 1e-9)
+        perturbed_logits = logits + gumbel_noise
+        
+        # 2. 在perturbed logits上进行top-k选择
+        # 使用argmax的离散选择（非可微分）
+        _, topk_indices = torch.topk(perturbed_logits, k, dim=-1)
+        
+        # 3. 创建二进制mask
+        binary_mask = torch.zeros_like(logits)
+        binary_mask.scatter_(1, topk_indices, 1.0)
+        
+        # 4. Straight-Through Estimator (STE)
+        # Forward pass: 使用离散的二进制mask
+        # Backward pass: 梯度通过原始的logits流动
+        ste_mask = binary_mask.detach() + logits - logits.detach()
+        
+        return ste_mask
+
+    # 在 selector 内
+    def forward(self, x):
+        B, N, D = x.shape
+        x = self.encoder(self.norm(x))
+        ctrl = self.ctrl.unsqueeze(0).expand(B, -1, -1)
+        tokens = torch.cat([x, ctrl], dim=1)             # [B, N+C, D]
+        logits = self.scorer(tokens).squeeze(-1)         # [B, N+C]
+
+        # Gumbel + Top-k + STE
+        U = torch.rand_like(logits)
+        gumbel = -torch.log(-torch.log(U + 1e-9) + 1e-9)
+        perturbed = logits + gumbel
+        topk_vals, topk_idx = torch.topk(perturbed, self.k_max, dim=-1)
+
+        # hard mask + soft gradient
+        hard_mask = torch.zeros_like(logits)
+        hard_mask.scatter_(1, topk_idx, 1.0)
+        soft = torch.softmax(logits, dim=-1)
+        mask = (hard_mask - soft).detach() + soft         # STE 形式
+
+        # 只取原始帧部分并 gather
+        frame_mask = mask[:, :N]
+        _, frame_topk = torch.topk(frame_mask, self.k_max, dim=-1)
+        idx_exp = frame_topk.unsqueeze(-1).expand(-1, -1, D)
+        selected_frames = torch.gather(x, 1, idx_exp)    # [B, k_max, D]
+        return selected_frames
+        # 在 selector 内
+    # def forward(self, x):
+    #     B, N, D = x.shape
+    #     x = self.encoder(self.norm(x))
+    #     ctrl = self.ctrl.unsqueeze(0).expand(B, -1, -1)
+    #     tokens = torch.cat([x, ctrl], dim=1)             # [B, N+C, D]
+    #     logits = self.scorer(tokens).squeeze(-1)         # [B, N+C]
+
+    #     # Gumbel + Top-k + STE
+    #     U = torch.rand_like(logits)
+    #     gumbel = -torch.log(-torch.log(U + 1e-9) + 1e-9)
+    #     perturbed = logits + gumbel
+    #     topk_vals, topk_idx = torch.topk(perturbed, self.k_max, dim=-1)
+
+    #     # hard mask + soft gradient
+    #     hard_mask = torch.zeros_like(logits)
+    #     hard_mask.scatter_(1, topk_idx, 1.0)
+    #     soft = torch.softmax(logits, dim=-1)
+    #     mask = (hard_mask - soft).detach() + soft         # STE 形式
+
+    #     # 只取原始帧部分并 gather
+    #     frame_mask = mask[:, :N]
+    #     _, frame_topk = torch.topk(frame_mask, self.k_max, dim=-1)
+    #     idx_exp = frame_topk.unsqueeze(-1).expand(-1, -1, D)
+    #     selected_frames = torch.gather(x, 1, idx_exp)    # [B, k_max, D]
+    #     return selected_frames
+    # def forward(self, x):
+    #     """
+    #     x: [B, N, dim_embed] - 输入已经是嵌入后的张量
+    #     """
+    #     B, N, D = x.shape
+        
+    #     # 输入已经是嵌入后的，直接进行归一化和transformer编码
+    #     x = self.norm(x)
+    #     x = self.encoder(x)  # [B, N, D]
+        
+    #     # append CTRL tokens
+    #     ctrl = self.ctrl.unsqueeze(0).expand(B, -1, -1)
+    #     tokens = torch.cat([x, ctrl], dim=1)  # [B, N+C, D]
+        
+    #     # scoring - 对所有tokens (包括CTRL tokens) 进行打分
+    #     scores = self.scorer(tokens).squeeze(-1)  # [B, N+C]
+        
+    #     # 只对原始frames应用选择，不包括CTRL tokens
+    #     frame_scores = scores[:, :N]  # [B, N]
+        
+    #     # FFS Top-K选择：使用Gumbel-Max STE实现可微分的top-k选择
+    #     # 1. 添加Gumbel噪声到logits
+    #     U = torch.rand_like(frame_scores)
+    #     gumbel_noise = -torch.log(-torch.log(U + 1e-9) + 1e-9)
+    #     perturbed_scores = frame_scores + gumbel_noise
+        
+    #     # 2. 在perturbed scores上进行top-k选择（离散，非可微分）
+    #     _, topk_indices = torch.topk(perturbed_scores, self.k_max, dim=-1)  # [B, k_max]
+        
+    #     # 3. 创建二进制mask
+    #     binary_mask = torch.zeros_like(frame_scores)
+    #     binary_mask.scatter_(1, topk_indices, 1.0)  # [B, N]
+        
+    #     # 4. Straight-Through Estimator (STE)
+    #     # Forward pass: 使用离散的二进制mask
+    #     # Backward pass: 梯度通过原始的frame_scores流动
+    #     ste_mask = binary_mask.detach() + frame_scores - frame_scores.detach()
+        
+    #     # 5. 使用STE mask进行加权选择，保持可微分性
+    #     selected_frames = ste_mask.unsqueeze(-1) * x  # [B, N, D]
+        
+    #     # 6. 只返回前k_max个frames（真正减少token数量）
+    #     selected_frames = selected_frames[:, :self.k_max, :]  # [B, k_max, D]
+        
+    #     return selected_frames
+    # def forward(self, x):
+    #     """
+    #     x: [B, N, dim_embed] - 输入已经是嵌入后的张量
+    #     """
+    #     B, N, _ = x.shape
+
+    #     # 输入已经是嵌入后的，直接进行归一化和transformer编码
+    #     x = self.norm(x)
+    #     x = self.encoder(x)  # [B, N, D]
+
+    #     # append CTRL tokens
+    #     ctrl = self.ctrl.unsqueeze(0).expand(B, -1, -1)
+    #     tokens = torch.cat([x, ctrl], dim=1)  # [B, N+C, D]
+
+    #     # scoring - 对所有tokens (包括CTRL tokens) 进行打分
+    #     scores = self.scorer(tokens).squeeze(-1)  # [B, N+C]
+        
+    #     # FFS Top-K selection with Gumbel-Max STE
+    #     mask = self.gumbel_topk_st(scores, self.k_max)  # [B, N+C]
+        
+    #     # 只对原始frames应用mask，不包括CTRL tokens
+    #     frame_mask = mask[:, :N]  # [B, N]
+        
+    #     # FFS Top-K选择：真正减少token数量
+    #     # 使用可微分的top-k selection
+        
+    #     # 方法：使用Gumbel-TopK的soft selection，然后通过加权平均来减少token数量
+    #     # 这样可以保持可微分性，同时实现真正的token数量减少
+        
+    #     # 获取frame scores（不包括CTRL tokens）
+    #     frame_scores = scores[:, :N]  # [B, N]
+        
+    #     # 使用Gumbel-TopK获取soft weights
+    #     soft_weights = self.gumbel_topk_st(frame_scores, self.k_max)  # [B, N]
+        
+    #     # FFS Top-K选择：真正符合原文的实现
+    #     # 原文：前向使用离散的argmax top-k选择，反向梯度通过原始logits流动
+        
+    #     # 1. 添加Gumbel噪声到logits
+    #     U = torch.rand_like(frame_scores)
+    #     gumbel_noise = -torch.log(-torch.log(U + 1e-9) + 1e-9)
+    #     perturbed_scores = frame_scores + gumbel_noise
+        
+    #     # 2. 在perturbed scores上进行top-k选择（离散，非可微分）
+    #     _, topk_indices = torch.topk(perturbed_scores, self.k_max, dim=-1)  # [B, k_max]
+        
+    #     # 3. 创建二进制mask
+    #     binary_mask = torch.zeros_like(frame_scores)
+    #     binary_mask.scatter_(1, topk_indices, 1.0)  # [B, N]
+        
+    #     # 4. Straight-Through Estimator (STE)
+    #     # Forward pass: 使用离散的二进制mask
+    #     # Backward pass: 梯度通过原始的frame_scores流动
+    #     ste_mask = binary_mask.detach() + frame_scores - frame_scores.detach()
+        
+    #     # 5. 应用mask到frames
+    #     masked_frames = ste_mask.unsqueeze(-1) * x  # [B, N, D]
+        
+    #     # 6. 为了真正减少token数量，我们使用gather操作
+    #     # 但这里会破坏梯度流，所以我们需要一个更好的方法
+        
+    #     # 替代方案：使用加权平均来模拟top-k选择，保持可微分性
+    #     # 将mask转换为soft weights
+    #     soft_weights = ste_mask / (ste_mask.sum(dim=-1, keepdim=True) + 1e-8)
+        
+    #     # 使用加权平均创建representative frames
+    #     selected_frames = torch.einsum('bn,bnd->bnd', soft_weights, x)  # [B, N, D]
+        
+    #     # 只返回前k_max个frames
+    #     selected_frames = selected_frames[:, :self.k_max, :]  # [B, k_max, D]
+        
+    #     return selected_frames
+########################################################
+
+
 class StreamEmbedTransformer(torch.nn.Module):
     def __init__(
         self,
@@ -61,6 +303,21 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.unembed_mode = unembed_mode
 
         norm = torch.nn.LayerNorm if norm_type == "LayerNorm" else RMSNorm
+
+        self.channel_selection = False
+
+        # 选择模块（轻量 transformer）
+        if self.channel_selection:
+            num_channels = 16
+            # 确保k_max与num_channels一致，以保持后续架构兼容性
+            self.selector = SelectorTransformer(
+                dim_in=self.dim_in,
+                dim_embed=self.dim_embed,
+                num_blocks=2,  # 可调，轻量
+                num_heads=4,
+                k_max=num_channels,  # 与num_channels一致
+                num_ctrl=4
+            )
 
         self.layers = torch.nn.ModuleList()
         for _ in range(self.num_blocks):
@@ -146,10 +403,23 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.embed_centroids = torch.nn.Linear(5, embed_size_centroids)
 
     def forward_channels(self, x_in, centroids):
+
         peh = positional_encoding_harmonic
 
-        # embed provided input data
-        x = peh(checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False))
+        if self.channel_selection: 
+            x_emded = checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False)
+            selected = self.selector(x_emded[:, 3:74, :].contiguous())
+            # embed provided input data
+            x = peh(selected)  # [B, k_max, D]
+
+            # x_emded = peh(checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False))
+            # # x = peh(x_emded)
+            # selected = self.selector(x_emded[:, 3:74, :].contiguous())
+            # x = torch.cat([x_emded[:, :3, :], selected, x_emded[:, 74:, :]], dim=1)
+        else:
+            # embed provided input data
+            x = peh(checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False))
+
 
         for layer in self.layers:
             x = checkpoint(layer, x, use_reentrant=False)
