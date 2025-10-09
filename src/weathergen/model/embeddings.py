@@ -304,7 +304,7 @@ class StreamEmbedTransformer(torch.nn.Module):
 
         norm = torch.nn.LayerNorm if norm_type == "LayerNorm" else RMSNorm
 
-        self.channel_selection = False
+        self.channel_selection = True
 
         # 选择模块（轻量 transformer）
         if self.channel_selection:
