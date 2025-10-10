@@ -20,9 +20,79 @@ from weathergen.model.positional_encoding import positional_encoding_harmonic
 
 
 ########################################################
+
+
+########################################################
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+
+class SelectorTransformer2(nn.Module):
+    def __init__(self, dim_in, dim_embed, num_blocks=2, num_heads=4, k_max=16, dropout_rate=0.1):
+        super().__init__()
+        self.dim_in = dim_in
+        self.dim_embed = dim_embed
+        self.num_blocks = num_blocks
+        self.num_heads = num_heads
+        self.k_max = k_max
+
+        self.norm = nn.LayerNorm(dim_embed)
+
+        self.layers = nn.ModuleList()
+        for _ in range(self.num_blocks):
+            self.layers.append(
+                MultiSelfAttentionHead(
+                    self.dim_embed,
+                    self.num_heads,
+                    dropout_rate=dropout_rate,
+                    with_qk_lnorm=True,
+                    with_flash=True,
+                )
+            )
+            self.layers.append(
+                MLP(
+                    self.dim_embed,
+                    self.dim_embed,
+                    hidden_factor=2,
+                    dropout_rate=dropout_rate,
+                    with_residual=True,
+                )
+            )
+
+        # scoring
+        self.scorer = nn.Sequential(
+            nn.LayerNorm(dim_embed),
+            nn.Linear(dim_embed, dim_embed),
+            nn.GELU(),
+            nn.Linear(dim_embed, 1)
+        )
+
+    def forward(self, x):
+        B, N, D = x.shape
+        x = self.norm(x)
+        for layer in self.layers:
+            x = layer(x)
+
+        logits = self.scorer(x).squeeze(-1)  # [B, N]
+
+        # Gumbel Top-K + STE
+        U = torch.rand_like(logits)
+        gumbel = -torch.log(-torch.log(U + 1e-9) + 1e-9)
+        perturbed = logits + gumbel
+        _, topk_idx = torch.topk(perturbed, self.k_max, dim=-1)
+
+        hard_mask = torch.zeros_like(logits)
+        hard_mask.scatter_(1, topk_idx, 1.0)
+        soft = torch.softmax(logits, dim=-1)
+        mask = (hard_mask - soft).detach() + soft
+
+        # gather
+        _, frame_topk = torch.topk(mask, self.k_max, dim=-1)
+        idx_exp = frame_topk.unsqueeze(-1).expand(-1, -1, D)
+        selected = torch.gather(x, 1, idx_exp)
+
+        return selected
+######
 
 
 class SelectorTransformer(nn.Module):
@@ -305,19 +375,32 @@ class StreamEmbedTransformer(torch.nn.Module):
         norm = torch.nn.LayerNorm if norm_type == "LayerNorm" else RMSNorm
 
         self.channel_selection = True
+        self.selector_mode = "fixed"   # 可选: "ctrl" / "fixed"
 
-        # 选择模块（轻量 transformer）
         if self.channel_selection:
             num_channels = 16
-            # 确保k_max与num_channels一致，以保持后续架构兼容性
-            self.selector = SelectorTransformer(
-                dim_in=self.dim_in,
-                dim_embed=self.dim_embed,
-                num_blocks=2,  # 可调，轻量
-                num_heads=4,
-                k_max=num_channels,  # 与num_channels一致
-                num_ctrl=4
-            )
+
+            if self.selector_mode == "ctrl":
+                # 原来的 SelectorTransformer（带 CTRL tokens）
+                self.selector = SelectorTransformer(
+                    dim_in=self.dim_in,
+                    dim_embed=self.dim_embed,
+                    num_blocks=2,
+                    num_heads=4,
+                    k_max=num_channels,
+                    num_ctrl=4
+                )
+            elif self.selector_mode == "fixed":
+                # 新的 SelectorTransformer2（不带 CTRL，只选固定数量 channel）
+                self.selector = SelectorTransformer2(
+                    dim_in=self.dim_in,
+                    dim_embed=self.dim_embed,
+                    num_blocks=2,
+                    num_heads=4,
+                    k_max=num_channels
+                )
+            else:
+                raise ValueError(f"Unknown selector_mode: {self.selector_mode}")
 
         self.layers = torch.nn.ModuleList()
         for _ in range(self.num_blocks):
