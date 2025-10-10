@@ -378,7 +378,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.selector_mode = "fixed"   # 可选: "ctrl" / "fixed"
 
         if self.channel_selection:
-            num_channels = 16
+            num_channels = 32 #16
 
             if self.selector_mode == "ctrl":
                 # 原来的 SelectorTransformer（带 CTRL tokens）
