@@ -898,7 +898,7 @@ class Model(torch.nn.Module):
             )
 
             tc_tokens = tte(
-                latent=tokens_stream,
+                tokens_stream,
                 output=tc_tokens,
                 latent_lens=model_params.tokens_lens,
                 output_lens=tcs_lens,

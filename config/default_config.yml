@@ -1,4 +1,4 @@
-streams_directory: "./config/streams/era5_1deg/"
+streams_directory: "./config/streams/era5_split/"
 
 embed_orientation: "channels"
 embed_local_coords: True
@@ -42,12 +42,12 @@ pred_mlp_adaln: True
 
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder
-forecast_offset : 0
+forecast_offset : 1
 forecast_delta_hrs: 0
-forecast_steps: 0
-forecast_policy: null
+forecast_steps: 2
+forecast_policy: fixed
 forecast_att_dense_rate: 1.0
-fe_num_blocks: 0
+fe_num_blocks: 8
 fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
@@ -85,6 +85,30 @@ batch_size_validation_per_gpu: 1
 # e.g. ".*ERA5" will match any module whose name ends in ERA5\
 # encoders and decoders that exist per stream have the stream name attached at the end
 freeze_modules: ""
+# freeze_modules: ".*ae.*|.*global.*|.*local.*|.*adapter.*|.*fe.*|"
+
+# Parameter-Efficient Fine-Tuning (PEFT) configuration
+peft:
+  enabled: false
+  method: "lora"  # Currently only "lora" is supported
+  target_modules:
+    - ".*proj_heads_q(?:\\.[0-9]+)?$"  # Match query projection layers (including sliced variants)
+    - ".*proj_heads_k(?:\\.[0-9]+)?$"  # Match key projection layers (including sliced variants)
+    - ".*proj_heads_v(?:\\.[0-9]+)?$"  # Match value projection layers (including sliced variants)
+    - ".*proj_out$"                     # Match attention output projection
+    - ".*(embeds|ae_local_blocks|ae_adapter|ae_global_blocks|fe_blocks|target_token_engines)\\.[0-9]+(?:\\.(?:tte|block|mlp)\\.[0-9]+)*(?:\\.layers\\.[0-9]+)+$"  # Match MLP linear layers across engines
+  lora_config:
+    r: 16                    # LoRA rank
+    alpha: 32                # LoRA alpha parameter
+    dropout: 0.1             # LoRA dropout rate
+    bias: "none"             # Bias handling: "none", "all", "lora_only"
+    modules_to_save:
+    - "model.embeds.0"
+    - "model.embed_target_coords.0"
+    - "model.pred_heads.0"
+    - "model.target_token_engines.0"
+  trainable_parameters:
+    - "*q_cells"
 
 # whether to track the exponential moving average of weights for validation
 validate_with_ema: True
@@ -93,7 +117,7 @@ ema_halflife_in_thousands: 1e-3
 
 # training mode: "forecast" or "masking" (masked token modeling)
 # for "masking" to train with auto-encoder mode, forecast_offset should be 0
-training_mode: "masking"
+training_mode: "forecast"
 # masking rate when training mode is "masking"; ignored in foreacast mode
 masking_rate: 0.6
 # sample the masking rate (with normal distribution centered at masking_rate)
@@ -113,7 +137,7 @@ masking_strategy_config: {"strategies": ["random", "healpix", "channel"],
                           "same_strategy_per_batch": false
                           }
 
-num_epochs: 32
+num_epochs: 8 #32
 samples_per_epoch: 4096
 samples_per_validation: 512
 shuffle: True

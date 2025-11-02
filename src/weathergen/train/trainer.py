@@ -32,6 +32,7 @@ from torch.distributed.tensor import DTensor, distribute_tensor
 import weathergen.common.config as config
 from weathergen.common.config import Config
 from weathergen.datasets.multi_stream_data_sampler import MultiStreamDataSampler
+from weathergen.model.adapters import create_adapter_manager
 from weathergen.model.attention import (
     MultiCrossAttentionHeadVarlen,
     MultiCrossAttentionHeadVarlenSlicedQ,
@@ -249,7 +250,42 @@ class Trainer(TrainerBase):
             torch.distributed.fsdp.register_fsdp_forward_method(embed, "forward_channels")
             torch.distributed.fsdp.register_fsdp_forward_method(embed, "forward_columns")
 
+        # Apply LoRA adapters if enabled
+        if cf.peft.get('enabled', False):
+            if is_root():
+                logger.info("Initializing LoRA adapters for WeatherGenerator model")
+            adapter_manager = create_adapter_manager(model, cf)
+            model = adapter_manager.attach_adapters()
+            # Store adapter manager for later use
+            self.adapter_manager = adapter_manager
+        else:
+            self.adapter_manager = None
+
         return model, model_params
+    
+    def _log_training_parameters(self):
+        """Log information about which parameters are being trained."""
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in self.model.parameters())
+        
+        logger.info(f"Training parameter summary:")
+        logger.info(f"  Trainable parameters: {trainable_params:,}")
+        logger.info(f"  Total parameters: {total_params:,}")
+        logger.info(f"  Trainable percentage: {100 * trainable_params / total_params:.2f}%")
+        
+        # Check if we're using LoRA
+        if hasattr(self, 'adapter_manager') and self.adapter_manager is not None:
+            logger.info(f"  Using LoRA adapters: YES")
+            if hasattr(self.adapter_manager, 'peft_model') and self.adapter_manager.peft_model is not None:
+                lora_params = [
+                    (name, param)
+                    for name, param in self.adapter_manager.peft_model.named_parameters()
+                    if "lora_" in name
+                ]
+                lora_trainable = sum(param.numel() for name, param in lora_params if param.requires_grad)
+                logger.info(f"  LoRA adapter parameters: {lora_trainable:,}")
+        else:
+            logger.info(f"  Using LoRA adapters: NO")
 
     def run(self, cf, devices, run_id_contd=None, epoch_contd=None):
         # general initalization
@@ -323,6 +359,10 @@ class Trainer(TrainerBase):
         # if with_fsdp then parameter count is unreliable
         if (is_root() and not cf.with_fsdp) or not cf.with_ddp:
             self.model.print_num_parameters()
+            
+        # LoRA: Log training parameter information
+        if is_root():
+            self._log_training_parameters()
 
         # https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
         # aiming for beta1=0.9 and beta2=0.95 following the MAE paper https://arxiv.org/pdf/2111.06377
@@ -735,6 +775,17 @@ class Trainer(TrainerBase):
         path_run = Path(self.cf.model_path) / run_id
         epoch_id = f"epoch{epoch:05d}" if epoch != -1 and epoch is not None else "latest"
         filename = f"{run_id}_{epoch_id}.chkpt"
+        
+        # Check if LoRA adapter exists and load it
+        if self.adapter_manager is not None:
+            adapter_path = path_run / f"{filename}_adapter"
+            if adapter_path.exists():
+                if is_root():
+                    logger.info(f"Loading LoRA adapter from {adapter_path}")
+                self.adapter_manager.load_adapter(str(adapter_path))
+            else:
+                if is_root():
+                    logger.warning(f"LoRA adapter not found at {adapter_path}, continuing without adapter")
 
         params = torch.load(
             path_run / filename, map_location=torch.device("cpu"), mmap=True, weights_only=True
@@ -913,6 +964,13 @@ class Trainer(TrainerBase):
             file_tmp.replace(file_out)
             if is_root():
                 logger.info(f"Saved model to {file_out}")
+
+            # Save LoRA adapters if enabled
+            if self.adapter_manager is not None:
+                adapter_path = base_path / f"{filename}_adapter"
+                self.adapter_manager.save_adapter(str(adapter_path))
+                if is_root():
+                    logger.info(f"Saved LoRA adapter to {adapter_path}")
 
             # save config
             config.save(self.cf, epoch)
