@@ -440,6 +440,7 @@ class ForecastingEngine(torch.nn.Module):
                             dim_aux=1,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
+                            with_rope=True,
                         )
                     )
                 else:
@@ -456,6 +457,7 @@ class ForecastingEngine(torch.nn.Module):
                             dim_aux=1,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
+                            with_rope=True,
                         )
                     )
                 # Add MLP block
