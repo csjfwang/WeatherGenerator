@@ -450,7 +450,97 @@ def plot_loss_per_stream(
         )
         _logger.info(f"Saving loss per stream plot to '{plt_fname}'")
         plt.savefig(plt_fname)
+    plt.close()
+
+
+####################################################################################################
+def plot_loss_overview(
+    mode: str,
+    runs_ids: dict[str, list],
+    runs_data: list[Metrics],
+    runs_active: list[bool],
+    plot_dir: Path,
+    x_axis: str = "samples",
+    x_scale_log: bool = False,
+):
+    """
+    Plot the aggregate loss (e.g. loss_avg_mean) for all runs in a single figure.
+
+    Parameters
+    ----------
+    mode : str
+        Stage to visualize ("train" or "val").
+    runs_ids : dict
+        Mapping between run id and metadata [slurm_id, description].
+    runs_data : list
+        List of Metrics objects for each run.
+    runs_active : list
+        Whether the corresponding run is still active in the queue.
+    plot_dir : Path
+        Directory to store the resulting figure.
+    x_axis : str
+        Column substring describing the x-axis (defaults to "samples").
+    x_scale_log : bool
+        If True, the x-axis will use logarithmic scaling.
+    """
+
+    plt.figure(figsize=(10, 7), dpi=300)
+    prop_cycle = plt.rcParams["axes.prop_cycle"]
+    colors = prop_cycle.by_key()["color"] + ["r", "g", "b", "k", "m", "y"]
+
+    plotted_any = False
+    for idx, (run_id, run_data) in enumerate(zip(runs_ids, runs_data, strict=False)):
+        df = run_data.by_mode(mode)
+        if df.is_empty():
+            continue
+        x_col = next((c for c in df.columns if x_axis in c), None)
+        loss_col = next((c for c in ("loss_avg_mean", "loss_avg_0_mean") if c in df.columns), None)
+        loss_series = None
+        if loss_col is not None:
+            loss_series = np.array(df[loss_col])
+        else:
+            aggregate_cols = [c for c in df.columns if c.endswith(".loss_avg")]
+            if aggregate_cols:
+                aggregate_values = [np.array(df[col], dtype=float) for col in aggregate_cols]
+                loss_series = np.nanmean(np.stack(aggregate_values, axis=0), axis=0)
+        if x_col is None or loss_series is None:
+            _logger.warning(
+                "Skipping %s for %s overview plot because required columns are missing.",
+                run_id,
+                mode,
+            )
+            continue
+        label = (
+            ("R" if runs_active[idx] else "X")
+            + f" : {run_id} : {runs_ids[run_id][1]}"
+        )
+        plt.plot(
+            np.array(df[x_col]),
+            loss_series,
+            label=label,
+            color=colors[idx % len(colors)],
+        )
+        plotted_any = True
+
+    if not plotted_any:
         plt.close()
+        _logger.warning("No data available for %s overview plot.", mode)
+        return
+
+    plt.title(f"{mode} loss overview")
+    plt.ylabel("loss")
+    plt.xlabel(x_axis)
+    plt.yscale("log")
+    if x_scale_log:
+        plt.xscale("log")
+    plt.grid(True, which="both", ls="-")
+    plt.legend()
+    plt.tight_layout()
+    rstr = "".join([f"{r}_" for r in runs_ids])
+    plt_fname = plot_dir / f"{rstr}{mode}_loss_overview.png"
+    _logger.info("Saving %s overview plot to '%s'", mode, plt_fname)
+    plt.savefig(plt_fname)
+    plt.close()
 
 
 ####################################################################################################
@@ -687,6 +777,24 @@ def plot_train(args=None):
 
     # plot learning rate
     plot_lr(runs_ids, runs_data, runs_active, plot_dir=out_dir)
+
+    # aggregate loss overview plots
+    plot_loss_overview(
+        "train",
+        runs_ids,
+        runs_data,
+        runs_active,
+        plot_dir=out_dir,
+        x_scale_log=x_scale_log,
+    )
+    plot_loss_overview(
+        "val",
+        runs_ids,
+        runs_data,
+        runs_active,
+        plot_dir=out_dir,
+        x_scale_log=x_scale_log,
+    )
 
     # # plot performance
     # plot_utilization(runs_ids, runs_data, runs_active, plot_dir=out_dir)

@@ -13,9 +13,10 @@ import logging
 import math
 import time
 import traceback
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import polars as pl
@@ -58,6 +59,19 @@ class Metrics:
                 return self.system
             case _:
                 raise ValueError(f"Unknown mode {s}. Use 'train', 'val' or 'system'.")
+
+
+@dataclass
+class LossFunctionSpec:
+    module: str | None
+    entry: Any
+
+    @property
+    def name(self) -> str:
+        entry = self.entry
+        if isinstance(entry, Sequence) and not isinstance(entry, str):
+            return str(entry[0])
+        return str(entry)
 
 
 class TrainLogger:
@@ -186,6 +200,8 @@ class TrainLogger:
         else:
             cf = config.load_config(private_home=None, from_run_id=run_id, mini_epoch=mini_epoch)
         run_id = cf.run_id
+        loss_fcts_train, legacy_train = _resolve_loss_functions(cf, TRAIN)
+        loss_fcts_val, legacy_val = _resolve_loss_functions(cf, VAL)
 
         result_dir_base = Path(cf.run_path)
         result_dir = result_dir_base / run_id
@@ -199,20 +215,33 @@ class TrainLogger:
         cols_train = ["dtime", "samples", "mse", "lr"]
         cols1 = [_weathergen_timestamp, "num_samples", "loss_avg_mean", "learning_rate"]
         for si in cf.streams:
-            for lf in cf.loss_fcts:
-                cols1 += [_key_loss(si["name"], lf[0])]
-                cols_train += [
-                    si["name"].replace(",", "").replace("/", "_").replace(" ", "_") + ", " + lf[0]
-                ]
-        with_stddev = [("stats" in lf) for lf in cf.loss_fcts]
-        if with_stddev:
-            for si in cf.streams:
-                cols1 += [_key_stddev(si["name"])]
+            for spec in loss_fcts_train:
+                lf_name = spec.name
+                cols1 += [_key_loss(si["name"], lf_name, spec.module)]
                 cols_train += [
                     si["name"].replace(",", "").replace("/", "_").replace(" ", "_")
                     + ", "
-                    + "stddev"
+                    + lf_name
                 ]
+        if loss_fcts_train:
+            if legacy_train:
+                for si in cf.streams:
+                    cols1 += [_key_stddev(si["name"], None, None)]
+                    cols_train += [
+                        si["name"].replace(",", "").replace("/", "_").replace(" ", "_")
+                        + ", "
+                        + "stddev"
+                    ]
+            else:
+                for si in cf.streams:
+                    for spec in loss_fcts_train:
+                        lf_name = spec.name
+                        cols1 += [_key_stddev(si["name"], lf_name, spec.module)]
+                        cols_train += [
+                            si["name"].replace(",", "").replace("/", "_").replace(" ", "_")
+                            + ", stddev_"
+                            + lf_name
+                        ]
         # read training log data
         try:
             with open(fname_log_train, "rb") as f:
@@ -257,20 +286,33 @@ class TrainLogger:
         cols_val = ["dtime", "samples"]
         cols2 = [_weathergen_timestamp, "num_samples"]
         for si in cf.streams:
-            for lf in cf.loss_fcts_val:
-                cols_val += [
-                    si["name"].replace(",", "").replace("/", "_").replace(" ", "_") + ", " + lf[0]
-                ]
-                cols2 += [_key_loss(si["name"], lf[0])]
-        with_stddev = [("stats" in lf) for lf in cf.loss_fcts_val]
-        if with_stddev:
-            for si in cf.streams:
-                cols2 += [_key_stddev(si["name"])]
+            for spec in loss_fcts_val:
+                lf_name = spec.name
                 cols_val += [
                     si["name"].replace(",", "").replace("/", "_").replace(" ", "_")
                     + ", "
-                    + "stddev"
+                    + lf_name
                 ]
+                cols2 += [_key_loss(si["name"], lf_name, spec.module)]
+        if loss_fcts_val:
+            if legacy_val:
+                for si in cf.streams:
+                    cols2 += [_key_stddev(si["name"], None, None)]
+                    cols_val += [
+                        si["name"].replace(",", "").replace("/", "_").replace(" ", "_")
+                        + ", "
+                        + "stddev"
+                    ]
+            else:
+                for si in cf.streams:
+                    for spec in loss_fcts_val:
+                        lf_name = spec.name
+                        cols2 += [_key_stddev(si["name"], lf_name, spec.module)]
+                        cols_val += [
+                            si["name"].replace(",", "").replace("/", "_").replace(" ", "_")
+                            + ", stddev_"
+                            + lf_name
+                        ]
         # read validation log data
         try:
             with open(fname_log_val, "rb") as f:
@@ -407,15 +449,30 @@ def clean_df(df, columns: list[str] | None):
     )
 
     if columns:
-        columns = list(set(columns))  # remove duplicates
+        deduped: list[str] = []
+        for column in columns:
+            if column not in deduped:
+                deduped.append(column)
+        columns = deduped
         # Backwards compatibility of "loss_avg_mean" (old) and "loss_avg_0_mean" (new) metric name
         if "loss_avg_mean" not in df.columns:
             idcs = [i for i in range(len(columns)) if columns[i] == "loss_avg_mean"]
             if len(idcs) > 0:
                 columns[idcs[0]] = "loss_avg_0_mean"
-        df = df.select(columns)
+        existing_cols = [c for c in columns if c in df.columns]
+        missing_cols = [c for c in columns if c not in df.columns]
+        if missing_cols:
+            _logger.debug(
+                "Missing metric columns %s when selecting from dataframe with columns %s",
+                missing_cols,
+                df.columns,
+            )
+        if not existing_cols:
+            _logger.warning("No requested metric columns found in dataframe; returning empty frame.")
+            return pl.DataFrame()
+        df = df.select(existing_cols)
         # Remove all rows where all columns are null
-        df = df.filter(~pl.all_horizontal(pl.col(c).is_null() for c in columns))
+        df = df.filter(~pl.all_horizontal(pl.col(c).is_null() for c in existing_cols))
 
     return df
 
@@ -434,16 +491,52 @@ def clean_name(s: str) -> str:
     return "".join(c for c in s if c.isalnum() or c == "_")
 
 
-def _key_loss(st_name: str, lf_name: str) -> str:
+def _key_loss(st_name: str, lf_name: str, module: str | None) -> str:
     st_name = clean_name(st_name)
+    lf_name = clean_name(lf_name)
+    if module:
+        module = clean_name(module)
+        return f"loss.{module}.{st_name}.{lf_name}.loss_avg"
     return f"stream.{st_name}.loss_{lf_name}.loss_avg"
 
 
-def _key_loss_chn(st_name: str, lf_name: str, ch_name: str) -> str:
+def _key_loss_chn(st_name: str, lf_name: str, ch_name: str, module: str | None) -> str:
     st_name = clean_name(st_name)
+    lf_name = clean_name(lf_name)
+    ch_name = clean_name(ch_name)
+    if module:
+        module = clean_name(module)
+        return f"loss.{module}.{st_name}.{lf_name}.{ch_name}"
     return f"stream.{st_name}.loss_{lf_name}.loss_{ch_name}"
 
 
-def _key_stddev(st_name: str) -> str:
+def _key_stddev(st_name: str, lf_name: str | None, module: str | None) -> str:
     st_name = clean_name(st_name)
+    if module and lf_name:
+        module = clean_name(module)
+        lf_name = clean_name(lf_name)
+        return f"loss.{module}.{st_name}.{lf_name}.stddev_avg"
     return f"stream.{st_name}.stddev_avg"
+
+
+def _resolve_loss_functions(cf, stage: Stage) -> tuple[list[LossFunctionSpec], bool]:
+    attr = "loss_fcts" if stage == TRAIN else "loss_fcts_val"
+    configured = cf.get(attr, None)
+    if configured:
+        return [LossFunctionSpec(module=None, entry=lf) for lf in list(configured)], True
+
+    mode_key = "training_mode_config" if stage == TRAIN else "validation_mode_config"
+    mode_config = cf.get(mode_key)
+    if not mode_config:
+        return [], False
+    losses_cfg = mode_config.get("losses")
+    if not losses_cfg:
+        return [], False
+    resolved: list[LossFunctionSpec] = []
+    for module_name, loss_cfg in losses_cfg.items():
+        loss_list = loss_cfg.get("loss_fcts")
+        if loss_list:
+            resolved.extend(
+                LossFunctionSpec(module=module_name, entry=lf) for lf in list(loss_list)
+            )
+    return resolved, False
