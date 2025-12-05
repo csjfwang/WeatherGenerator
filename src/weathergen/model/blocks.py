@@ -233,6 +233,8 @@ class OriginalPredictionBlock(nn.Module):
                     dim_aux=dim_aux,
                     norm_eps=self.cf.norm_eps,
                     attention_dtype=get_dtype(self.cf.attention_dtype),
+                    headwise_attn_output_gate=self.cf.headwise_attn_output_gate,
+                    elementwise_attn_output_gate=self.cf.elementwise_attn_output_gate,
                 )
             )
 

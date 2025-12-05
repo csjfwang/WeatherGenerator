@@ -149,6 +149,8 @@ class LocalAssimilationEngine(torch.nn.Module):
                     norm_type=self.cf.norm_type,
                     norm_eps=self.cf.norm_eps,
                     attention_dtype=get_dtype(self.cf.attention_dtype),
+                    headwise_attn_output_gate=self.cf.headwise_attn_output_gate,
+                    elementwise_attn_output_gate=self.cf.elementwise_attn_output_gate,
                 )
             )
             self.ae_local_blocks.append(
@@ -269,6 +271,8 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         norm_type=self.cf.norm_type,
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
+                        headwise_attn_output_gate=self.cf.headwise_attn_output_gate,
+                        elementwise_attn_output_gate=self.cf.elementwise_attn_output_gate,
                     )
                 )
             else:
@@ -284,6 +288,8 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         norm_type=self.cf.norm_type,
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
+                        headwise_attn_output_gate=self.cf.headwise_attn_output_gate,
+                        elementwise_attn_output_gate=self.cf.elementwise_attn_output_gate,
                     )
                 )
             # MLP block
@@ -336,6 +342,8 @@ class ForecastingEngine(torch.nn.Module):
                             dim_aux=1,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
+                            headwise_attn_output_gate=self.cf.headwise_attn_output_gate,
+                            elementwise_attn_output_gate=self.cf.elementwise_attn_output_gate,
                         )
                     )
                 else:
@@ -352,6 +360,8 @@ class ForecastingEngine(torch.nn.Module):
                             dim_aux=1,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
+                            headwise_attn_output_gate=self.cf.headwise_attn_output_gate,
+                            elementwise_attn_output_gate=self.cf.elementwise_attn_output_gate,
                         )
                     )
                 # Add MLP block
@@ -497,18 +507,20 @@ class TargetPredictionEngineClassic(nn.Module):
             # Optional Self-Attention Head
             if self.cf.pred_self_attention:
                 self.tte.append(
-                    MultiSelfAttentionHeadVarlen(
-                        dim_embed=self.dims_embed[i],
-                        num_heads=self.cf.streams[0]["target_readout"]["num_heads"],
-                        dropout_rate=0.1,  # Assuming dropout_rate is 0.1
-                        with_qk_lnorm=True,
-                        with_flash=self.cf.with_flash_attention,
-                        norm_type=self.cf.norm_type,
-                        dim_aux=self.dim_coord_in,
-                        norm_eps=self.cf.norm_eps,
-                        attention_dtype=get_dtype(self.cf.attention_dtype),
-                    )
+                MultiSelfAttentionHeadVarlen(
+                    dim_embed=self.dims_embed[i],
+                    num_heads=self.cf.streams[0]["target_readout"]["num_heads"],
+                    dropout_rate=0.1,  # Assuming dropout_rate is 0.1
+                    with_qk_lnorm=True,
+                    with_flash=self.cf.with_flash_attention,
+                    norm_type=self.cf.norm_type,
+                    dim_aux=self.dim_coord_in,
+                    norm_eps=self.cf.norm_eps,
+                    attention_dtype=get_dtype(self.cf.attention_dtype),
+                    headwise_attn_output_gate=self.cf.headwise_attn_output_gate,
+                    elementwise_attn_output_gate=self.cf.elementwise_attn_output_gate,
                 )
+            )
 
             # MLP Block
             self.tte.append(
@@ -607,6 +619,8 @@ class TargetPredictionEngine(nn.Module):
             "dim_aux": self.dim_coord_in,
             "norm_eps": self.cf.norm_eps,
             "attention_dtype": get_dtype(self.cf.attention_dtype),
+            "headwise_attn_output_gate": self.cf.headwise_attn_output_gate,
+            "elementwise_attn_output_gate": self.cf.elementwise_attn_output_gate,
         }
         self.tte = nn.ModuleList()
         self.output_in_norm = nn.LayerNorm(self.dims_embed[0])

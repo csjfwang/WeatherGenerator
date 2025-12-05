@@ -13,6 +13,7 @@ import torch
 from flash_attn import flash_attn_func, flash_attn_varlen_func
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
+from weathergen.model.attention_gate import AttentionGate
 from weathergen.model.norms import AdaLayerNorm, RMSNorm
 
 
@@ -31,6 +32,8 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         dim_aux=None,
         norm_eps=1e-5,
         attention_dtype=torch.bfloat16,
+        headwise_attn_output_gate: bool = False,
+        elementwise_attn_output_gate: bool = False,
     ):
         super(MultiSelfAttentionHeadVarlen, self).__init__()
 
@@ -52,7 +55,15 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
             self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
-        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
+        self.attention_gate = AttentionGate(
+            dim_embed=dim_embed,
+            num_heads=num_heads,
+            head_dim=self.dim_head_proj,
+            bias=False,
+            headwise_attn_output_gate=headwise_attn_output_gate,
+            elementwise_attn_output_gate=elementwise_attn_output_gate,
+        )
+        self.proj_heads_q = self.attention_gate.q_proj
         self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False)
@@ -75,8 +86,9 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
 
         # project onto heads and q,k,v and
         # ensure these are 4D tensors as required for flash attention
+        qs, gate_score = self.attention_gate.project(x)
+        qs = self.lnorm_q(qs).to(self.dtype)
         s = [x.shape[0], self.num_heads, -1]
-        qs = self.lnorm_q(self.proj_heads_q(x).reshape(s)).to(self.dtype)
         ks = self.lnorm_k(self.proj_heads_k(x).reshape(s)).to(self.dtype)
         vs = self.proj_heads_v(x).reshape(s)
 
@@ -97,6 +109,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
             dropout_p=dropout_rate,
         )
 
+        outs = self.attention_gate.apply_gate(outs, gate_score)
         out = self.proj_out(outs.flatten(-2, -1))
 
         if self.with_residual:
@@ -119,6 +132,8 @@ class MultiSelfAttentionHeadVarlenFlex(torch.nn.Module):
         softcap=0.0,
         norm_eps=1e-5,
         attention_dtype=torch.bfloat16,
+        headwise_attn_output_gate: bool = False,
+        elementwise_attn_output_gate: bool = False,
     ):
         super(MultiSelfAttentionHeadVarlenFlex, self).__init__()
 
@@ -136,7 +151,15 @@ class MultiSelfAttentionHeadVarlenFlex(torch.nn.Module):
             norm = RMSNorm
 
         self.lnorm = norm(dim_embed, eps=norm_eps)
-        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
+        self.attention_gate = AttentionGate(
+            dim_embed=dim_embed,
+            num_heads=num_heads,
+            head_dim=self.dim_head_proj,
+            bias=False,
+            headwise_attn_output_gate=headwise_attn_output_gate,
+            elementwise_attn_output_gate=elementwise_attn_output_gate,
+        )
+        self.proj_heads_q = self.attention_gate.q_proj
         self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False)
@@ -166,12 +189,14 @@ class MultiSelfAttentionHeadVarlenFlex(torch.nn.Module):
 
         # project onto heads and q,k,v and
         # ensure these are 4D tensors as required for flash attention
+        qs, gate_score = self.attention_gate.project(x)
+        qs = self.lnorm_q(qs).to(self.dtype).unsqueeze(1).permute([1, 2, 0, 3])
         s = [x.shape[0], 1, self.num_heads, -1]
-        qs = self.lnorm_q(self.proj_heads_q(x).reshape(s)).to(self.dtype).permute([1, 2, 0, 3])
         ks = self.lnorm_k(self.proj_heads_k(x).reshape(s)).to(self.dtype).permute([1, 2, 0, 3])
         vs = self.proj_heads_v(x).reshape(s).permute([1, 2, 0, 3])
 
         outs = self.compiled_flex_attention(qs, ks, vs).transpose(1, 2).squeeze()
+        outs = self.attention_gate.apply_gate(outs, gate_score)
 
         out = self.dropout(self.proj_out(outs.flatten(-2, -1)))
         if self.with_residual:
@@ -197,6 +222,8 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
         dim_aux=None,
         norm_eps=1e-5,
         attention_dtype=torch.bfloat16,
+        headwise_attn_output_gate: bool = False,
+        elementwise_attn_output_gate: bool = False,
     ):
         super(MultiSelfAttentionHeadLocal, self).__init__()
 
@@ -217,7 +244,15 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
             self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
-        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
+        self.attention_gate = AttentionGate(
+            dim_embed=dim_embed,
+            num_heads=num_heads,
+            head_dim=self.dim_head_proj,
+            bias=False,
+            headwise_attn_output_gate=headwise_attn_output_gate,
+            elementwise_attn_output_gate=elementwise_attn_output_gate,
+        )
+        self.proj_heads_q = self.attention_gate.q_proj
         self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False)
@@ -248,12 +283,14 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
         x = self.lnorm(x) if ada_ln_aux is None else self.lnorm(x, ada_ln_aux)
 
         # project onto heads
+        qs, gate_score = self.attention_gate.project(x)
+        qs = self.lnorm_q(qs).to(self.dtype).permute([0, 2, 1, 3])
         s = [x.shape[0], x.shape[1], self.num_heads, -1]
-        qs = self.lnorm_q(self.proj_heads_q(x).reshape(s)).to(self.dtype).permute([0, 2, 1, 3])
         ks = self.lnorm_k(self.proj_heads_k(x).reshape(s)).to(self.dtype).permute([0, 2, 1, 3])
         vs = self.proj_heads_v(x).reshape(s).permute([0, 2, 1, 3])
 
         outs = self.flex_attention(qs, ks, vs, block_mask=self.block_mask).transpose(1, 2)
+        outs = self.attention_gate.apply_gate(outs, gate_score)
 
         out = self.proj_out(self.dropout(outs.flatten(-2, -1)))
         if self.with_residual:
@@ -278,6 +315,8 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
         dim_aux=None,
         norm_eps=1e-5,
         attention_dtype=torch.bfloat16,
+        headwise_attn_output_gate: bool = False,
+        elementwise_attn_output_gate: bool = False,
     ):
         super(MultiCrossAttentionHeadVarlen, self).__init__()
 
@@ -319,6 +358,8 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
 
         self.dtype = attention_dtype
         assert with_flash, "Only flash attention supported at the moment"
+        self.headwise_attn_output_gate = headwise_attn_output_gate
+        self.elementwise_attn_output_gate = elementwise_attn_output_gate
 
     def forward(self, x_q, x_kv, x_q_lens=None, x_kv_lens=None, ada_ln_aux=None):
         if self.with_residual:
@@ -487,6 +528,8 @@ class MultiSelfAttentionHead(torch.nn.Module):
         dim_aux=None,
         norm_eps=1e-5,
         attention_dtype=torch.bfloat16,
+        headwise_attn_output_gate: bool = False,
+        elementwise_attn_output_gate: bool = False,
     ):
         super(MultiSelfAttentionHead, self).__init__()
 
@@ -508,7 +551,15 @@ class MultiSelfAttentionHead(torch.nn.Module):
             self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
-        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
+        self.attention_gate = AttentionGate(
+            dim_embed=dim_embed,
+            num_heads=num_heads,
+            head_dim=self.dim_head_proj,
+            bias=False,
+            headwise_attn_output_gate=headwise_attn_output_gate,
+            elementwise_attn_output_gate=elementwise_attn_output_gate,
+        )
+        self.proj_heads_q = self.attention_gate.q_proj
         self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False)
@@ -534,8 +585,13 @@ class MultiSelfAttentionHead(torch.nn.Module):
 
         # project onto heads and q,k,v and
         # ensure these are 4D tensors as required for flash attention
+        qs, gate_score = self.attention_gate.project(x)
+        qs = self.lnorm_q(qs).to(self.dtype)
+        if len(x.shape) == 2:
+            qs = qs.unsqueeze(1)
+            if gate_score is not None:
+                gate_score = gate_score.unsqueeze(1)
         s = [*([x.shape[0], 1] if len(x.shape) == 2 else x.shape[:-1]), self.num_heads, -1]
-        qs = self.lnorm_q(self.proj_heads_q(x).reshape(s)).to(self.dtype)
         ks = self.lnorm_k(self.proj_heads_k(x).reshape(s)).to(self.dtype)
         vs = self.proj_heads_v(x).reshape(s).to(self.dtype)
 
@@ -544,6 +600,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
 
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
         outs = flash_attn_func(qs, ks, vs, softcap=self.softcap, dropout_p=dropout_rate)
+        outs = self.attention_gate.apply_gate(outs, gate_score)
 
         out = self.proj_out(outs.flatten(-2, -1))
         if self.with_residual:
