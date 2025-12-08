@@ -307,10 +307,10 @@ class Model(torch.nn.Module):
         vertsmm, _ = healpix_verts_rots(self.healpix_level, 0.5, 0.5)
         coords_latlon = r3tos2(vertsmm.to(torch.float32))
         coords_latlon = coords_latlon.unsqueeze(1).repeat(1, cf.ae_local_num_queries, 1)
-        coords_latlon = coords_latlon.to(dtype=self.dtype)
-        coords_latlon = coords_latlon.to(device=q_cells.device)
+        # coords_latlon = coords_latlon.to(dtype=self.dtype)
+        coords_latlon = coords_latlon.to(device=q_cells.device).to(dtype=self.dtype)
         # Register as buffer (not a parameter) to avoid optimizer/EMA issues but keep device moves.
-        self.register_buffer("rope_coords", coords_latlon)
+        self.register_buffer("rope_coords", coords_latlon, persistent=False)
 
         ##############
         # query aggregation engine
