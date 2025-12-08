@@ -303,9 +303,14 @@ class QueryAggregationEngine(torch.nn.Module):
                 )
             )
 
-    def forward(self, tokens, use_reentrant):
+    def forward(self, tokens, coords=None, use_reentrant=True):
         for block in self.ae_aggregation_blocks:
-            tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
+            if isinstance(block, MultiSelfAttentionHead):
+                tokens = checkpoint(block, tokens, coords, use_reentrant=use_reentrant)
+            elif isinstance(block, MultiSelfAttentionHeadLocal):
+                tokens = checkpoint(block, tokens, coords, use_reentrant=use_reentrant)
+            else:
+                tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
         return tokens
 
 

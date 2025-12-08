@@ -756,14 +756,19 @@ class Model(torch.nn.Module):
         # (applying this here assumes batch_size=1)
         # permute to use ae_local_num_queries as the batchsize and no_of_tokens
         # as seq len for flash attention
+        mask = cell_lens.to(torch.bool)
+        coords_global = None
+        if getattr(self.cf, "use_global_rope", True):
+            coords_global = (
+                self.rope_coords[mask]
+                .to(device=tokens_global_unmasked.device, dtype=tokens_global_unmasked.dtype)
+                .permute(1, 0, 2)
+            )
         tokens_global_unmasked = torch.permute(tokens_global_unmasked, [1, 0, 2])
         tokens_global_unmasked = self.ae_aggregation_engine(
-            tokens_global_unmasked, use_reentrant=False
+            tokens_global_unmasked, coords=coords_global, use_reentrant=False
         )
         tokens_global_unmasked = torch.permute(tokens_global_unmasked, [1, 0, 2])
-
-        # create mask from cell lens
-        mask = cell_lens.to(torch.bool)
 
         # fill empty tensor using mask for positions of unmasked tokens
         tokens_global[mask] = tokens_global_unmasked.to(tokens_global.dtype)
@@ -787,12 +792,14 @@ class Model(torch.nn.Module):
         """
 
         batch_size = tokens.shape[0]
-        coords = (
-            self.rope_coords.flatten(0, 1)
-            .unsqueeze(0)
-            .repeat(batch_size, 1, 1)
-            .to(device=tokens.device, dtype=tokens.dtype)
-        )
+        coords = None
+        if getattr(self.cf, "use_global_rope", True):
+            coords = (
+                self.rope_coords.flatten(0, 1)
+                .unsqueeze(0)
+                .repeat(batch_size, 1, 1)
+                .to(device=tokens.device, dtype=tokens.dtype)
+            )
 
         # global assimilation engine and adapter
         tokens = self.ae_global_engine(tokens, coords=coords, use_reentrant=False)
