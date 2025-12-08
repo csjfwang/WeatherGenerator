@@ -121,7 +121,7 @@ masking_strategy_config: {"strategies": ["random", "healpix", "channel"],
                           "same_strategy_per_batch": false
                           }
 
-num_mini_epochs: 48
+num_mini_epochs: 16
 samples_per_mini_epoch: 4096
 samples_per_validation: 512
 

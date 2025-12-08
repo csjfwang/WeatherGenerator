@@ -371,9 +371,14 @@ class GlobalAssimilationEngine(torch.nn.Module):
                 )
             )
 
-    def forward(self, tokens, use_reentrant):
+    def forward(self, tokens, coords=None, use_reentrant=True):
         for block in self.ae_global_blocks:
-            tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
+            if isinstance(block, MultiSelfAttentionHead):
+                tokens = checkpoint(block, tokens, coords, use_reentrant=use_reentrant)
+            elif isinstance(block, MultiSelfAttentionHeadLocal):
+                tokens = checkpoint(block, tokens, coords, use_reentrant=use_reentrant)
+            else:
+                tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
         return tokens
 
 
@@ -451,7 +456,11 @@ class ForecastingEngine(torch.nn.Module):
     def forward(self, tokens, fstep):
         aux_info = torch.tensor([fstep], dtype=torch.float32, device="cuda")
         for block in self.fe_blocks:
-            tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
+            if isinstance(block, (MultiSelfAttentionHead, MultiSelfAttentionHeadLocal)):
+                # No RoPE coords during forecasting; pass aux to AdaLayerNorm.
+                tokens = checkpoint(block, tokens, None, aux_info, use_reentrant=False)
+            else:
+                tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
 
         return tokens
 

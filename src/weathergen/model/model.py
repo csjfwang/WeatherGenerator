@@ -23,6 +23,7 @@ from astropy_healpix import healpy
 from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
+from weathergen.datasets.utils import healpix_verts_rots, r3tos2
 from weathergen.model.engines import (
     EmbeddingEngine,
     EnsPredictionHead,
@@ -151,27 +152,6 @@ class ModelParams(torch.nn.Module):
 
         dim_embed = cf.ae_global_dim_embed
         self.pe_global.data.fill_(0.0)
-        xs = 2.0 * np.pi * torch.arange(0, dim_embed, 2, device=self.pe_global.device) / dim_embed
-        self.pe_global.data[..., 0::2] = 0.5 * torch.sin(
-            torch.outer(8 * torch.arange(cf.ae_local_num_queries, device=self.pe_global.device), xs)
-        )
-        self.pe_global.data[..., 0::2] += (
-            torch.sin(
-                torch.outer(torch.arange(self.num_healpix_cells, device=self.pe_global.device), xs)
-            )
-            .unsqueeze(1)
-            .repeat((1, cf.ae_local_num_queries, 1))
-        )
-        self.pe_global.data[..., 1::2] = 0.5 * torch.cos(
-            torch.outer(8 * torch.arange(cf.ae_local_num_queries, device=self.pe_global.device), xs)
-        )
-        self.pe_global.data[..., 1::2] += (
-            torch.cos(
-                torch.outer(torch.arange(self.num_healpix_cells, device=self.pe_global.device), xs)
-            )
-            .unsqueeze(1)
-            .repeat((1, cf.ae_local_num_queries, 1))
-        )
 
         # healpix neighborhood structure
 
@@ -322,6 +302,14 @@ class Model(torch.nn.Module):
             s = (1, cf.ae_local_num_queries, cf.ae_global_dim_embed)
             q_cells = torch.rand(s, requires_grad=True) / cf.ae_global_dim_embed
         self.q_cells = torch.nn.Parameter(q_cells, requires_grad=True)
+
+        # Precompute per-cell center coordinates (lat, lon in radians) for 2D RoPE.
+        vertsmm, _ = healpix_verts_rots(self.healpix_level, 0.5, 0.5)
+        coords_latlon = r3tos2(vertsmm.to(torch.float32))
+        coords_latlon = coords_latlon.unsqueeze(1).repeat(1, cf.ae_local_num_queries, 1)
+        coords_latlon = coords_latlon.to(dtype=self.dtype)
+        # Register as buffer (not a parameter) to avoid optimizer/EMA issues but keep device moves.
+        self.register_buffer("rope_coords", coords_latlon)
 
         ##############
         # query aggregation engine
@@ -797,8 +785,16 @@ class Model(torch.nn.Module):
             Latent representation of the model
         """
 
+        batch_size = tokens.shape[0]
+        coords = (
+            self.rope_coords.flatten(0, 1)
+            .unsqueeze(0)
+            .repeat(batch_size, 1, 1)
+            .to(device=tokens.device, dtype=tokens.dtype)
+        )
+
         # global assimilation engine and adapter
-        tokens = self.ae_global_engine(tokens, use_reentrant=False)
+        tokens = self.ae_global_engine(tokens, coords=coords, use_reentrant=False)
 
         return tokens
 
