@@ -97,7 +97,8 @@ def positional_encoding_harmonic_coord(x, lats, lons):
 
 
 ####################################################################################################
-# Rotary positional embeddings (2D) adapted from Qwen3 implementation for reuse in WeatherGenerator.
+# Rotary positional embeddings (2D) adapted from Qwen3 & LLama for reuse in WeatherGenerator.
+# https://github.com/qiuzh20/gated_attention/blob/main/modeling_qwen3.py
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
 
@@ -106,7 +107,6 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-####################################################################################################
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     """Applies Rotary Position Embedding to the query and key tensors.
 
