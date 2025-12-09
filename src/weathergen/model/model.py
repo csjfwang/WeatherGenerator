@@ -84,6 +84,19 @@ class ModelParams(torch.nn.Module):
         )
         self.pe_global = torch.nn.Parameter(pe, requires_grad=False)
 
+        ### ROPE COORDS ###
+        # Precompute per-cell center coordinates (lat, lon in radians) for 2D RoPE.
+        # Shape: (num_healpix_cells, ae_local_num_queries, 2)
+        self.rope_coords = torch.nn.Parameter(
+            torch.zeros(
+                self.num_healpix_cells,
+                cf.ae_local_num_queries,
+                2,
+                dtype=torch.float32,
+            ),
+            requires_grad=False,
+        )
+
         ### HEALPIX NEIGHBOURS ###
         hlc = self.healpix_level
         with warnings.catch_warnings(action="ignore"):
@@ -152,6 +165,12 @@ class ModelParams(torch.nn.Module):
 
         dim_embed = cf.ae_global_dim_embed
         self.pe_global.data.fill_(0.0)
+
+        # Precompute per-cell center coordinates (lat, lon in radians) for 2D RoPE.
+        verts, _ = healpix_verts_rots(self.healpix_level, 0.5, 0.5)
+        coords = r3tos2(verts.to(self.rope_coords.device)).to(self.rope_coords.dtype)
+        coords = coords.unsqueeze(1).repeat(1, cf.ae_local_num_queries, 1)
+        self.rope_coords.data.copy_(coords)
 
         # healpix neighborhood structure
 
@@ -302,15 +321,6 @@ class Model(torch.nn.Module):
             s = (1, cf.ae_local_num_queries, cf.ae_global_dim_embed)
             q_cells = torch.rand(s, requires_grad=True) / cf.ae_global_dim_embed
         self.q_cells = torch.nn.Parameter(q_cells, requires_grad=True)
-
-        # Precompute per-cell center coordinates (lat, lon in radians) for 2D RoPE.
-        vertsmm, _ = healpix_verts_rots(self.healpix_level, 0.5, 0.5)
-        coords_latlon = r3tos2(vertsmm.to(torch.float32))
-        coords_latlon = coords_latlon.unsqueeze(1).repeat(1, cf.ae_local_num_queries, 1)
-        # coords_latlon = coords_latlon.to(dtype=self.dtype)
-        coords_latlon = coords_latlon.to(device=q_cells.device).to(dtype=self.dtype)
-        # Register as buffer (not a parameter) to avoid optimizer/EMA issues but keep device moves.
-        self.register_buffer("rope_coords", coords_latlon, persistent=False)
 
         ##############
         # query aggregation engine
@@ -760,7 +770,7 @@ class Model(torch.nn.Module):
         coords_global = None
         if getattr(self.cf, "use_global_rope", True):
             coords_global = (
-                self.rope_coords[mask]
+                model_params.rope_coords[mask]
                 .to(device=tokens_global_unmasked.device, dtype=tokens_global_unmasked.dtype)
                 .permute(1, 0, 2)
             )
@@ -795,7 +805,7 @@ class Model(torch.nn.Module):
         coords = None
         if getattr(self.cf, "use_global_rope", True):
             coords = (
-                self.rope_coords.flatten(0, 1)
+                model_params.rope_coords.flatten(0, 1)
                 .unsqueeze(0)
                 .repeat(batch_size, 1, 1)
                 .to(device=tokens.device, dtype=tokens.dtype)
