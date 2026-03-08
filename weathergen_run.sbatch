@@ -72,8 +72,11 @@ export LD_LIBRARY_PATH="$TORCH_LIB:$LD_LIBRARY_PATH"
 
 export UV_CACHE_DIR=/p/project1/weatherai/uv_cache_shared
 
-#srun uv --offline run train_continue --from_run_id hsbwt96m
+# srun uv run --offline --no-sync train_continue --from_run_id jvzyw3uq
 
 # srun uv --offline run train
 
 srun uv run --offline --no-sync train --config config/tarot_20pct.yml
+# srun uv run --offline --no-sync train --config config/full_100pct.yml
+# srun uv run --offline --no-sync train --config config/stratified_20pct.yml
+# srun uv run --offline --no-sync train --config config/random_20pct.yml
