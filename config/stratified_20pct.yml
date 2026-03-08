@@ -1,0 +1,3 @@
+random_sampler:
+  method: stratified
+  ratio: 0.2
