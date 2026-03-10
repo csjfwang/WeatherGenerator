@@ -72,7 +72,7 @@ export LD_LIBRARY_PATH="$TORCH_LIB:$LD_LIBRARY_PATH"
 
 export UV_CACHE_DIR=/p/project1/weatherai/uv_cache_shared
 
-# srun uv run --offline --no-sync train_continue --from_run_id jvzyw3uq
+# srun uv run --offline --no-sync train_continue --from_run_id m573vlib
 
 # srun uv --offline run train
 
