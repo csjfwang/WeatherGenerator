@@ -167,6 +167,81 @@ def _plot_grouped_bar(df: pd.DataFrame, title: str, ylabel: str, out_path: Path)
     plt.close()
 
 
+def _compute_year_month_lift(
+    all_df: pd.DataFrame,
+    method_order: list[str],
+) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
+    year_month_counts = (
+        all_df.groupby(["method", "month", "year"]).size().unstack(fill_value=0).sort_index(axis=1)
+    )
+    year_month_counts = year_month_counts.reindex(columns=sorted(year_month_counts.columns), fill_value=0)
+
+    grids: dict[str, pd.DataFrame] = {}
+    for method in method_order:
+        method_df = year_month_counts.loc[method].copy()
+        method_df = method_df.reindex(index=range(1, 13), fill_value=0)
+        grids[method] = method_df
+
+    full_grid = grids["full"].astype(np.float64)
+    full_share = full_grid / max(float(full_grid.values.sum()), 1.0)
+
+    lift_grids: dict[str, pd.DataFrame] = {}
+    for method in method_order:
+        if method == "full":
+            continue
+        grid = grids[method].astype(np.float64)
+        method_share = grid / max(float(grid.values.sum()), 1.0)
+        # Lift > 1 means this year-month cell is overrepresented relative to full-data frequency.
+        lift = method_share / full_share.replace(0.0, np.nan)
+        lift_grids[method] = lift.replace([np.inf, -np.inf], np.nan)
+
+    return lift_grids, full_share
+
+
+def _plot_year_month_lift_heatmaps(
+    lift_grids: dict[str, pd.DataFrame],
+    out_path: Path,
+) -> None:
+    if len(lift_grids) == 0:
+        return
+    methods = list(lift_grids.keys())
+    ncols = len(methods)
+    fig, axes = plt.subplots(1, ncols, figsize=(5.5 * ncols + 1.2, 7), squeeze=False)
+    finite_vals = np.concatenate(
+        [np.ravel(grid.to_numpy(dtype=float)) for grid in lift_grids.values()]
+    )
+    finite_vals = finite_vals[np.isfinite(finite_vals)]
+    vmax = float(np.nanquantile(finite_vals, 0.98)) if finite_vals.size > 0 else 1.0
+    vmax = max(vmax, 1.0)
+
+    month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    im = None
+    for ax, method in zip(axes[0], methods, strict=True):
+        grid = lift_grids[method]
+        im = ax.imshow(
+            grid.to_numpy(dtype=float),
+            aspect="auto",
+            origin="lower",
+            cmap="YlOrRd",
+            vmin=0.0,
+            vmax=vmax,
+        )
+        ax.set_title(f"{method} selection lift")
+        ax.set_xlabel("year")
+        ax.set_ylabel("month")
+        ax.set_xticks(np.arange(grid.shape[1]))
+        ax.set_xticklabels([str(c) for c in grid.columns], rotation=90)
+        ax.set_yticks(np.arange(12))
+        ax.set_yticklabels(month_labels)
+    if im is not None:
+        # Reserve a dedicated colorbar axis on the far right so it does not overlap the last panel.
+        cbar_ax = fig.add_axes([0.92, 0.15, 0.015, 0.7])
+        fig.colorbar(im, cax=cbar_ax, label="selection lift vs full")
+    fig.tight_layout(rect=[0.0, 0.0, 0.9, 1.0])
+    plt.savefig(out_path, dpi=180)
+    plt.close()
+
+
 def _compute_rolling_density(
     all_df: pd.DataFrame,
     method_order: list[str],
@@ -500,6 +575,7 @@ def main() -> None:
     run_length_counts, run_length_share = _run_length_distribution(method_indices)
     effective_metrics = _effective_window_metrics(method_indices)
     year_distance_counts, year_distance_share = _compute_year_distance_share(all_df, anchor_year)
+    year_month_lift_grids, full_year_month_share = _compute_year_month_lift(all_df, method_order)
 
     year_counts.to_csv(output_dir / "year_counts.csv")
     month_counts.to_csv(output_dir / "month_counts.csv")
@@ -513,6 +589,9 @@ def main() -> None:
     effective_metrics.to_csv(output_dir / "effective_windows_metrics.csv")
     year_distance_counts.to_csv(output_dir / "year_distance_counts.csv")
     year_distance_share.to_csv(output_dir / "year_distance_share.csv")
+    full_year_month_share.to_csv(output_dir / "year_month_full_share.csv")
+    for method, grid in year_month_lift_grids.items():
+        grid.to_csv(output_dir / f"year_month_lift_{method}.csv")
 
     _plot_grouped_bar(
         year_counts,
@@ -549,6 +628,10 @@ def main() -> None:
         year_distance_share,
         output_dir / "year_distance_share.png",
         anchor_year=anchor_year,
+    )
+    _plot_year_month_lift_heatmaps(
+        year_month_lift_grids,
+        output_dir / "year_month_lift_heatmap.png",
     )
 
     if args.feature_pattern is not None:
