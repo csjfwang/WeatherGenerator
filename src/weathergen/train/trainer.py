@@ -26,6 +26,7 @@ import json
 from numpy.typing import NDArray
 from omegaconf import OmegaConf
 from torch import Tensor
+from collections import defaultdict
 
 # FSDP2
 from torch.distributed.fsdp import (
@@ -33,6 +34,7 @@ from torch.distributed.fsdp import (
     fully_shard,
 )
 from torch.distributed.tensor import DTensor, distribute_tensor
+import torch.distributed as dist
 
 import weathergen.common.config as config
 from weathergen.common.config import Config
@@ -678,8 +680,14 @@ class Trainer(TrainerBase):
 
             # save model checkpoint (with designation _latest)
             if bidx % self.train_log_freq.checkpoint == 0 and bidx > 0:
-                self.save_model(-1)
-                json.dump(self.frequency_counter, open(f"counter_dict_{cf.rank}_{cf.run_id}.json","w"))
+                self.save_model(-1) 
+                all_counters = [defaultdict(int) for _ in range(self.cf.world_size)]
+                dist.all_gather_object(all_counters, dict(self.frequency_counter))
+                merged = defaultdict(int)
+                for counter in all_counters:
+                    for k, v in self.frequency_counter.items():
+                        merged[k] += v
+                json.dump(merged, open(f"counter_dict_{cf.run_id}.json","w"))
 
             self.cf.istep += 1
 
