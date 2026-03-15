@@ -828,15 +828,30 @@ def _load_indices_from_file(indices_file):
     return np.loadtxt(indices_path, dtype=np.int64)
 
 
+def _cache_file_fingerprint(path_str: str) -> str:
+    if not path_str:
+        return "none"
+    path = pathlib.Path(path_str)
+    if not path.exists():
+        return "missing"
+    if path.is_dir():
+        return "dir"
+    stat = path.stat()
+    return f"mtime:{stat.st_mtime_ns}:size:{stat.st_size}"
+
+
 def sampler_cache_key(random_sampler) -> str:
     if random_sampler == "full":
         payload = "full"
     elif isinstance(random_sampler, float):
         payload = f"random:{random_sampler:.12f}"
     elif hasattr(random_sampler, "items"):
-        payload = json.dumps(
-            {str(k): str(v) for k, v in random_sampler.items()}, sort_keys=True, separators=(",", ":")
-        )
+        normalized = {str(k): str(v) for k, v in random_sampler.items()}
+        method = str(random_sampler.get("method", "")).lower()
+        if method == "tarot":
+            indices_file = str(random_sampler.get("indices_file", ""))
+            normalized["indices_file_fingerprint"] = _cache_file_fingerprint(indices_file)
+        payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     else:
         payload = str(random_sampler)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]

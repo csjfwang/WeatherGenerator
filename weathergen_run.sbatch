@@ -76,7 +76,8 @@ export UV_CACHE_DIR=/p/project1/weatherai/uv_cache_shared
 
 # srun uv --offline run train
 
-srun uv run --offline --no-sync train --config config/tarot_20pct.yml
+# srun uv run --offline --no-sync train --config config/tarot_20pct.yml
+srun uv run --offline --no-sync train --config config/recent_20pct.yml
 # srun uv run --offline --no-sync train --config config/full_100pct.yml
 # srun uv run --offline --no-sync train --config config/stratified_20pct.yml
 # srun uv run --offline --no-sync train --config config/random_20pct.yml
