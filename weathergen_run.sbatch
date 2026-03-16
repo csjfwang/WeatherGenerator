@@ -73,11 +73,93 @@ export LD_LIBRARY_PATH="$TORCH_LIB:$LD_LIBRARY_PATH"
 export UV_CACHE_DIR=/p/project1/weatherai/uv_cache_shared
 
 # srun uv run --offline --no-sync train_continue --from_run_id r93m2nvw
+srun uv run --offline --no-sync train_continue --from_run_id full2full --reuse_run_id 
 
 # srun uv --offline run train
 
 # srun uv run --offline --no-sync train --config config/tarot_20pct.yml
-srun uv run --offline --no-sync train --config config/recent_20pct.yml
+# srun uv run --offline --no-sync train --config config/recent_20pct.yml
 # srun uv run --offline --no-sync train --config config/full_100pct.yml
 # srun uv run --offline --no-sync train --config config/stratified_20pct.yml
 # srun uv run --offline --no-sync train --config config/random_20pct.yml
+
+# Full data 32 epochs + 20% data 32 epochs
+
+# srun uv run --offline --no-sync train_continue \
+#   --from_run_id ojoiudna \
+#   --mini_epoch -1 \
+#   --run_id full2tarot20 \
+#   --config config/tarot_20pct.yml \
+#   --options istep=0 num_mini_epochs=32 data_loader_rng_seed=42
+
+
+# srun uv run --offline --no-sync train_continue \
+#   --from_run_id ojoiudna \
+#   --mini_epoch -1 \
+#   --run_id full2random20 \
+#   --config config/random_20pct.yml \
+#   --options istep=0 num_mini_epochs=32 data_loader_rng_seed=42
+
+# srun uv run --offline --no-sync train_continue \
+#   --from_run_id ojoiudna \
+#   --mini_epoch -1 \
+#   --run_id full2recent20 \
+#   --config config/recent_20pct.yml \
+#   --options istep=0 num_mini_epochs=32 data_loader_rng_seed=42
+
+# srun uv run --offline --no-sync train_continue \
+#   --from_run_id ojoiudna \
+#   --mini_epoch -1 \
+#   --run_id full2stratified20 \
+#   --config config/stratified_20pct.yml \
+#   --options istep=0 num_mini_epochs=32 data_loader_rng_seed=42
+
+
+# srun uv run --offline --no-sync train_continue \
+#   --from_run_id ojoiudna \
+#   --mini_epoch -1 \
+#   --run_id full2full \
+#   --config config/full_100pct.yml \
+#   --options istep=0 num_mini_epochs=32 data_loader_rng_seed=42
+
+
+
+# full data 64 epochs (run_id: r0pn5rws) + 20% finetune 32 epochs
+
+# srun uv run --offline --no-sync train_continue \
+#   --from_run_id r0pn5rws \
+#   --mini_epoch -1 \
+#   --run_id 64full2tarot20 \
+#   --config config/tarot_20pct.yml \
+#   --options istep=0 num_mini_epochs=32 data_loader_rng_seed=42
+
+
+# srun uv run --offline --no-sync train_continue \
+#   --from_run_id r0pn5rws \
+#   --mini_epoch -1 \
+#   --run_id 64full2random20 \
+#   --config config/random_20pct.yml \
+#   --options istep=0 num_mini_epochs=32 data_loader_rng_seed=42
+
+# srun uv run --offline --no-sync train_continue \
+#   --from_run_id r0pn5rws \
+#   --mini_epoch -1 \
+#   --run_id 64full2recent20 \
+#   --config config/recent_20pct.yml \
+#   --options istep=0 num_mini_epochs=32 data_loader_rng_seed=42
+
+# srun uv run --offline --no-sync train_continue \
+#   --from_run_id r0pn5rws \
+#   --mini_epoch -1 \
+#   --run_id 64full2stratified20 \
+#   --config config/stratified_20pct.yml \
+#   --options istep=0 num_mini_epochs=32 data_loader_rng_seed=42
+
+
+# srun uv run --offline --no-sync train_continue \
+#   --from_run_id r0pn5rws \
+#   --mini_epoch -1 \
+#   --run_id 64full2full \
+#   --config config/full_100pct.yml \
+#   --options istep=0 num_mini_epochs=32 data_loader_rng_seed=42
+
