@@ -674,7 +674,12 @@ class Model(torch.nn.Module):
             z_pre_norm=tokens,
         )
 
-    def forward(self, model_params: ModelParams, batch: ModelBatch) -> ModelOutput:
+    def forward(
+        self,
+        model_params: ModelParams,
+        batch: ModelBatch,
+        return_global_tokens: bool = False,
+    ) -> ModelOutput | tuple[ModelOutput, torch.Tensor]:
         """Forward pass of the model
 
         Tokens are processed through the model components, which were defined in the create method.
@@ -695,6 +700,8 @@ class Model(torch.nn.Module):
         # collapse along input step dimension
         tokens = tokens.reshape(shape).sum(axis=1)
 
+        global_tokens = tokens
+
         # roll-out in latent space, iterate and generate output over requested output steps
         for step in batch.get_output_idxs():
             # apply forecasting engine (if present)
@@ -706,6 +713,8 @@ class Model(torch.nn.Module):
             # latent predictions (raw and with SSL heads)
             output = self.predict_latent(model_params, step, tokens, batch, output)
 
+        if return_global_tokens:
+            return output, global_tokens
         return output
 
     def predict_latent(

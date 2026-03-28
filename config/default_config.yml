@@ -126,6 +126,31 @@ train_logging:
   checkpoint: 250
   log_grad_norms: False
 
+# Optional feature export during inference for TAROT.
+# Supported values: [] | [mean] | [mean_std] | [mean,mean_std]
+tarot_feature_poolings: []
+# Export TAROT features only during `inference` when explicitly enabled.
+tarot_export_features: False
+# If True with tarot_export_features, skip zarr sample output and only write npz features.
+tarot_export_features_only: False
+# Feature representation mode for TAROT.
+#   "latent"   - pool hidden states from assimilate_global (fast, approximate)
+#   "gradient" - per-sample projected gradient via JL transform (closer to TAROT paper)
+tarot_feature_mode: "gradient"
+# Random projection dimension for gradient features (used when tarot_feature_mode="gradient").
+tarot_grad_proj_dim: 512
+# Regex to filter model parameters for gradient collection (empty = all parameters).
+# Example: ".*assimilate_global.*" selects only global assimilation layers.
+tarot_grad_wrt: ""
+# Random seed for the JL projection matrix.
+tarot_grad_proj_seed: 0
+# Optional global index origin for TAROT exports and downstream selection.
+# When set, feature export writes `idx_global` in addition to `idx_time_ns`.
+# Example: "1979-01-01"
+tarot_global_index_origin: ""
+# Step size (hours) used to convert time -> global index when tarot_global_index_origin is set.
+tarot_global_index_step_hours: 6
+
 # parameters for data loading
 data_loading :
 
@@ -177,6 +202,13 @@ training_config:
   num_mini_epochs: 32
   samples_per_mini_epoch: 4096
   shuffle: True
+  # `random_sampler` options:
+  # - full
+  # - 0.2                              # 20% random subset
+  # - {method: tarot, indices_file: "/path/to/tarot_indices.npy"}              # already selected indices
+  # - {method: tarot, indices_file: "/path/to/tarot_indices.npy", ratio: 0.5}  # optional re-subsampling
+  # random_sampler: { method: stratified, ratio: 0.01 }
+  random_sampler: full
 
   start_date: 1979-01-01T00:00
   end_date: 2022-12-31T00:00
@@ -232,6 +264,8 @@ validation_config:
 
   samples_per_mini_epoch: 256
   shuffle: False
+  # Same options as training_config.random_sampler; defaults to full validation set.
+  random_sampler: full
 
   start_date: 2023-10-01T00:00
   end_date: 2023-12-31T00:00

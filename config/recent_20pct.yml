@@ -1,0 +1,4 @@
+training_config:
+  random_sampler:
+    method: tarot
+    indices_file: TAROT/selected_indices_recent_20pct.npy

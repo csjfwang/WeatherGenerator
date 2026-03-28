@@ -1,0 +1,4 @@
+training_config:
+  random_sampler:
+    method: random
+    ratio: 0.2

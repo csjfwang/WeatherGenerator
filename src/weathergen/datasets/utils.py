@@ -8,6 +8,11 @@
 # nor does it submit to any jurisdiction.
 
 
+import hashlib
+import json
+import pathlib
+from collections import defaultdict
+
 import astropy_healpix as hp
 import numpy as np
 import torch
@@ -282,3 +287,146 @@ def get_tokens_lens(streams: dict, batch_data: BatchSamples, input_steps: int) -
     )
 
     return source_tokens_lens
+
+
+
+def split_indices_by_months(time_window_handler, index_range):
+    time_grid = np.arange(
+        time_window_handler.t_start,
+        time_window_handler.t_end,
+        time_window_handler.t_window_step,
+        dtype="datetime64[ns]",
+    )
+    real_indices = np.arange(index_range.start, index_range.end, dtype=np.int64)
+    # Extract year-month as a comparable array (e.g., '2017-02').
+    months = time_grid.astype("datetime64[M]").astype(np.int64)
+
+    # Group indices by month.
+    month_groups = defaultdict(list)
+    for month, idx in zip(months, real_indices, strict=True):
+        month_groups[month].append(idx)
+
+    # Convert lists to sorted NumPy arrays for easier use.
+    return {month: np.sort(np.asarray(idxs, dtype=np.int64)) for month, idxs in month_groups.items()}
+
+
+def _ensure_valid_indices(indices, index_range):
+    start = int(index_range.start)
+    end = int(index_range.end)
+    indices = np.asarray(indices, dtype=np.int64).reshape(-1)
+    if indices.size == 0:
+        raise ValueError("No indices provided after sampling.")
+    if np.any((indices < start) | (indices >= end)):
+        raise ValueError(f"Found sampled indices outside valid range [{start}, {end}).")
+    return np.unique(indices)
+
+
+def _sample_by_ratio(indices, ratio, rng):
+    if not (0.0 < ratio <= 1.0):
+        raise ValueError("sampling ratio should be in (0, 1].")
+    if ratio == 1.0:
+        return indices
+    num_selected = max(int(ratio * indices.shape[0]), 1)
+    selected_ids = rng.choice(indices.shape[0], size=num_selected, replace=False)
+    return np.sort(indices[selected_ids])
+
+
+def _sample_by_months(month_indices, ratio, rng):
+    if not (0.0 < ratio <= 1.0):
+        raise ValueError("sampling ratio should be in (0, 1].")
+    selected_indices = []
+    for month in month_indices:
+        selected_indices.append(_sample_by_ratio(month_indices[month], ratio, rng))
+    return np.sort(np.concatenate(selected_indices))
+
+
+def _load_indices_from_file(indices_file):
+    indices_path = pathlib.Path(indices_file)
+    if not indices_path.exists():
+        raise FileNotFoundError(f"indices file not found: {indices_path}")
+
+    suffix = indices_path.suffix.lower()
+    if suffix == ".npy":
+        return np.load(indices_path)
+    if suffix == ".json":
+        with indices_path.open() as f:
+            content = json.load(f)
+        if isinstance(content, dict):
+            if "indices" not in content:
+                raise ValueError("JSON indices file must contain key 'indices'.")
+            return np.asarray(content["indices"])
+        return np.asarray(content)
+
+    # Fallback: text file with one index per line (or whitespace separated).
+    return np.loadtxt(indices_path, dtype=np.int64)
+
+
+def _cache_file_fingerprint(path_str: str) -> str:
+    if not path_str:
+        return "none"
+    path = pathlib.Path(path_str)
+    if not path.exists():
+        return "missing"
+    if path.is_dir():
+        return "dir"
+    stat = path.stat()
+    return f"mtime:{stat.st_mtime_ns}:size:{stat.st_size}"
+
+
+def sampler_cache_key(random_sampler) -> str:
+    if random_sampler == "full":
+        payload = "full"
+    elif isinstance(random_sampler, float):
+        payload = f"random:{random_sampler:.12f}"
+    elif hasattr(random_sampler, "items"):
+        normalized = {str(k): str(v) for k, v in random_sampler.items()}
+        method = str(random_sampler.get("method", "")).lower()
+        if method == "tarot":
+            indices_file = str(random_sampler.get("indices_file", ""))
+            normalized["indices_file_fingerprint"] = _cache_file_fingerprint(indices_file)
+        payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    else:
+        payload = str(random_sampler)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def indices_sampler(time_window_handler, random_sampler, seed=42):
+    index_range = time_window_handler.get_index_range()
+    rng = np.random.default_rng(seed)
+    start = int(index_range.start)
+    end = int(index_range.end)
+    full_indices = np.arange(start, end, dtype=np.int64)
+
+    if random_sampler == "full":
+        return full_indices
+
+    if isinstance(random_sampler, float):
+        if not (0.0 < random_sampler < 1.0):
+            raise ValueError("float sampling ratio should be in (0, 1).")
+        return _sample_by_ratio(full_indices, random_sampler, rng)
+
+    if hasattr(random_sampler, "get"):
+        method = str(random_sampler.get("method", "")).lower()
+        if method == "random":
+            ratio = float(random_sampler.get("ratio", 1.0))
+            return _sample_by_ratio(full_indices, ratio, rng)
+        if method == "stratified":
+            month_wise_indices = split_indices_by_months(time_window_handler, index_range)
+            ratio = float(random_sampler.get("ratio", 1.0))
+            return _sample_by_months(month_wise_indices, ratio, rng)
+        if method == "tarot":
+            indices_file = random_sampler.get("indices_file", None)
+            if indices_file is None:
+                raise ValueError("TAROT sampler requires `indices_file`.")
+            # TAROT file is expected to already be the selected subset; default avoids re-subsampling.
+            loaded = _load_indices_from_file(str(indices_file))
+            loaded = _ensure_valid_indices(loaded, index_range)
+            ratio = random_sampler.get("ratio", None)
+            if ratio is None:
+                return loaded
+            return _sample_by_ratio(loaded, float(ratio), rng)
+
+    raise ValueError(
+        "Unsupported random_sampler. Use `full`, float ratio (e.g. 0.2), "
+        "or a mapping like {method: tarot, indices_file: ..., ratio: 0.2}."
+    )

@@ -29,6 +29,8 @@ from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
 from weathergen.datasets.utils import (
     get_tokens_lens,
+    indices_sampler,
+    sampler_cache_key,
 )
 from weathergen.readers_extra.registry import get_extra_reader
 from weathergen.train.utils import Stage, get_batch_size_from_config
@@ -104,11 +106,25 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         self.time_window_handler = TimeWindowHandler(
             mode_cfg.start_date, mode_cfg.end_date, self.len_timedelta, self.step_timedelta
         )
+        self.random_sampler = mode_cfg.get("random_sampler", "full")
         if is_root():
             logger.info(self.time_window_handler)
 
         index_range = self.time_window_handler.get_index_range()
-        perms_len = int(index_range.end - index_range.start)
+        sampler_key = sampler_cache_key(self.random_sampler)
+        sampler_seed = int(cf.data_loading.rng_seed)
+        sampled_indices_path = pathlib.Path(
+            "sampled_indices_"
+            f"{self._stage}_{sampler_key}_seed{sampler_seed}_{index_range.start}_{index_range.end}.npy"
+        )
+        if sampled_indices_path.exists():
+            self.sampled_indices = np.load(sampled_indices_path)
+        else:
+            self.sampled_indices = indices_sampler(
+                self.time_window_handler, self.random_sampler, seed=sampler_seed
+            )
+            np.save(sampled_indices_path, self.sampled_indices)
+        perms_len = len(self.sampled_indices)
 
         # Handle forecast_delta_hrs which might be int (hours) or string (timedelta)
         self.forecast_cfg = mode_cfg.get("forecast", {})
@@ -201,7 +217,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 self.streams_datasets[stream_info["name"]] += [ds]
 
         # length of dataset; check the repeat data flag and adjust len accordingly
-        self.len = int(index_range.end - index_range.start)
+        self.len = len(self.sampled_indices)
         if not self.repeat_data:
             if self.samples_per_mini_epoch:
                 if self.samples_per_mini_epoch <= self.len:
@@ -312,7 +328,12 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             "to fix this, it usually suffices to increase the data range "
         )
         assert adjusted_idx_end > 0, msg
-        self.perms = np.arange(index_range.start, adjusted_idx_end)
+        self.perms = self.sampled_indices[self.sampled_indices < adjusted_idx_end]
+        if self.perms.size == 0:
+            raise ValueError(
+                "No usable sampled indices after applying forecast horizon filter. "
+                f"adjusted_idx_end={adjusted_idx_end}."
+            )
 
         # check repeat_data flag and fill up perms accordingly
         if self.repeat_data and len(self.perms) < self.samples_per_mini_epoch:

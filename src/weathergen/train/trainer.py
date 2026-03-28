@@ -8,12 +8,19 @@
 # In applying this licence, ECMWF does not waive the privileges and immunities
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
+import contextlib
 import copy
+import json
 import logging
+import re
+import sys
 import time
+from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import tqdm
 from omegaconf import OmegaConf
 
@@ -83,6 +90,8 @@ class Trainer(TrainerBase):
         self.batch_size_validation_per_gpu = -1
         self.batch_size_test_per_gpu = -1
         self.collapse_monitor: CollapseMonitor | None = None
+        self.is_inference_run: bool = False
+        self.frequency_counter = defaultdict(int)
 
     def get_batch_size_total(self, batch_size_per_gpu) -> int:
         """
@@ -181,6 +190,7 @@ class Trainer(TrainerBase):
         self.init(cf, devices)
 
         cf = self.cf
+        self.is_inference_run = True
         device_type = torch.accelerator.current_accelerator()
         self.device = torch.device(f"{device_type}:{cf.local_rank}")
         self.ema_model = None
@@ -235,6 +245,7 @@ class Trainer(TrainerBase):
         # general initalization
         self.init(cf, devices)
         cf = self.cf
+        self.is_inference_run = False
 
         device_type = torch.accelerator.current_accelerator()
         self.device = torch.device(f"{device_type}:{cf.local_rank}")
@@ -256,6 +267,8 @@ class Trainer(TrainerBase):
         self.data_loader_validation = torch.utils.data.DataLoader(
             self.dataset_val, **loader_params, sampler=None
         )
+
+        self.frequency_counter = defaultdict(int)
 
         self.model, self.model_params = init_model_and_shard(
             cf,
@@ -427,6 +440,9 @@ class Trainer(TrainerBase):
         # training loop
         self.t_start = time.time()
         for bidx, batch in enumerate(dataset_iter):
+            sample_idx = int(self._get_batch_sample_indices(batch)[0])
+            self.frequency_counter[sample_idx] += 1
+
             if cf.data_loading.get("memory_pinning", False):
                 # pin memory for faster CPU-GPU transfer
                 batch = batch.pin_memory()
@@ -536,10 +552,137 @@ class Trainer(TrainerBase):
             # save model checkpoint (with designation _latest)
             if bidx % self.train_logging.checkpoint == 0 and bidx > 0:
                 self.save_model(-1)
+                self._write_frequency_counter()
 
             self.cf.general.istep += 1
 
         self.dataset.advance()
+
+    def _get_batch_sample_indices(self, batch) -> np.ndarray:
+        sample_idxs = []
+        for sample in batch.get_source_samples().samples:
+            stream_data = next((sd for sd in sample.streams_data.values() if sd is not None), None)
+            if stream_data is not None:
+                sample_idxs.append(int(stream_data.sample_idx))
+        if not sample_idxs:
+            raise ValueError("Could not infer sample indices from batch.")
+        return np.asarray(sample_idxs, dtype=np.int64)
+
+    def _sample_indices_to_time_ns(self, sample_idxs: np.ndarray) -> np.ndarray:
+        return np.asarray(
+            [
+                self.dataset_val.time_window_handler.window(np.int64(idx_)).start
+                for idx_ in sample_idxs
+            ],
+            dtype="datetime64[ns]",
+        ).astype(np.int64)
+
+    def _repeat_features_to_match_batch(self, features: np.ndarray, num_samples: int) -> np.ndarray:
+        if features.shape[0] == num_samples:
+            return features
+        if features.shape[0] == 1:
+            return np.repeat(features, num_samples, axis=0)
+        raise ValueError(
+            f"Feature/sample count mismatch: features={features.shape[0]}, samples={num_samples}."
+        )
+
+    def _write_frequency_counter(self) -> None:
+        counter_path = config.get_path_run(self.cf) / f"counter_dict_{self.cf.general.run_id}.json"
+        merged = defaultdict(int)
+        if self.cf.with_ddp and dist.is_available() and dist.is_initialized():
+            gathered = [None for _ in range(self.cf.world_size)]
+            dist.all_gather_object(gathered, dict(self.frequency_counter))
+            for counter in gathered:
+                for key, value in counter.items():
+                    merged[int(key)] += int(value)
+        else:
+            for key, value in self.frequency_counter.items():
+                merged[int(key)] += int(value)
+
+        if is_root():
+            with counter_path.open("w") as f:
+                json.dump(dict(sorted(merged.items())), f)
+
+    def _init_tarot_gradient_projector(self, grad_dim, proj_dim, proj_seed, device):
+        tarot_root = str(Path(__file__).resolve().parents[3] / "TAROT")
+        if tarot_root not in sys.path:
+            sys.path.insert(0, tarot_root)
+
+        class _LocalRademacherProjector:
+            def __init__(self, grad_dim_, proj_dim_, seed_, device_, block_size_):
+                self.grad_dim = int(grad_dim_)
+                self.proj_dim = int(proj_dim_)
+                self.seed = int(seed_)
+                self.device = torch.device(device_)
+                self.block_size = int(max(1, min(block_size_, self.proj_dim)))
+
+            def _make_block(self, width: int, block_id: int, model_id: int, dtype: torch.dtype):
+                gen = torch.Generator(device=self.device)
+                gen.manual_seed(self.seed + 1000 * block_id + 100000 * model_id)
+                mat = torch.empty((self.grad_dim, width), device=self.device, dtype=dtype)
+                mat.bernoulli_(p=0.5, generator=gen)
+                mat.mul_(2.0).sub_(1.0)
+                return mat
+
+            def project(self, grads: torch.Tensor, model_id: int = 0):
+                if grads.ndim != 2:
+                    raise ValueError(f"Expected grads to be 2D, got shape {tuple(grads.shape)}.")
+                if grads.shape[1] != self.grad_dim:
+                    raise ValueError(
+                        f"Gradient width mismatch for local projector: got {grads.shape[1]}, expected {self.grad_dim}."
+                    )
+
+                grads = grads.to(device=self.device, dtype=torch.float32)
+                out = torch.zeros((grads.shape[0], self.proj_dim), device=self.device, dtype=grads.dtype)
+                start = 0
+                block_id = 0
+                while start < self.proj_dim:
+                    end = min(start + self.block_size, self.proj_dim)
+                    width = end - start
+                    proj_block = self._make_block(width, block_id, model_id, grads.dtype)
+                    out[:, start:end] = grads @ proj_block
+                    start = end
+                    block_id += 1
+                return out
+
+        try:
+            from tarot.projectors import CudaProjector, ProjectionType
+
+            return CudaProjector(
+                grad_dim=grad_dim,
+                proj_dim=proj_dim,
+                seed=proj_seed,
+                proj_type=ProjectionType.rademacher,
+                device=device,
+                max_batch_size=8,
+            )
+        except Exception:
+            try:
+                from tarot.projectors import BasicProjector, ProjectionType
+
+                max_proj_bytes = 2 * 1024**3
+                safe_block = max(1, int(max_proj_bytes / (grad_dim * 4)))
+                block_size = min(safe_block, proj_dim)
+                return BasicProjector(
+                    grad_dim=grad_dim,
+                    proj_dim=proj_dim,
+                    seed=proj_seed,
+                    proj_type=ProjectionType.rademacher,
+                    device=torch.device(device),
+                    block_size=block_size,
+                    dtype=torch.float32,
+                )
+            except Exception:
+                max_proj_bytes = 2 * 1024**3
+                safe_block = max(1, int(max_proj_bytes / (grad_dim * 4)))
+                block_size = min(safe_block, proj_dim)
+                return _LocalRademacherProjector(
+                    grad_dim_=grad_dim,
+                    proj_dim_=proj_dim,
+                    seed_=proj_seed,
+                    device_=device,
+                    block_size_=block_size,
+                )
 
     def validate(self, mini_epoch, mode_cfg, batch_size):
         """
@@ -550,20 +693,90 @@ class Trainer(TrainerBase):
         self.model.eval()
 
         dataset_val_iter = iter(self.data_loader_validation)
-
         num_samples_write = mode_cfg.get("output", {}).get("num_samples", 0) * batch_size
 
-        with torch.no_grad():
+        # ---- TAROT feature export setup ----
+        export_features = self.is_inference_run and bool(cf.get("tarot_export_features", False))
+        feature_mode = str(cf.get("tarot_feature_mode", "latent")).lower() if export_features else "latent"
+        export_latent = export_features and feature_mode == "latent"
+        export_gradients = export_features and feature_mode == "gradient"
+        export_features_only = export_features and bool(cf.get("tarot_export_features_only", False))
+        global_idx_origin = str(cf.get("tarot_global_index_origin", "")).strip()
+        global_idx_step_hours = int(cf.get("tarot_global_index_step_hours", 6))
+        export_global_idx = bool(global_idx_origin)
+
+        def _time_ns_to_global_idx_checked(sample_time_ns: np.ndarray) -> np.ndarray:
+            origin_ns = np.datetime64(global_idx_origin).astype("datetime64[ns]").astype(np.int64)
+            step_ns = np.int64(global_idx_step_hours) * np.int64(3600 * 10**9)
+            delta = sample_time_ns.astype(np.int64) - origin_ns
+            if np.any(delta < 0):
+                raise ValueError("Encountered sample time earlier than tarot_global_index_origin.")
+            if np.any(delta % step_ns != 0):
+                raise ValueError("Sample times are not aligned with tarot_global_index_step_hours.")
+            return (delta // step_ns).astype(np.int64)
+
+        # Latent mode setup
+        feature_poolings = []
+        if export_latent:
+            feature_poolings = list(dict.fromkeys(str(p) for p in cf.get("tarot_feature_poolings", [])))
+            if not feature_poolings:
+                export_latent = False
+
+        # Gradient mode setup
+        projector = None
+        grad_param_names = set()
+        if export_gradients:
+            if cf.get("with_fsdp", False) and cf.get("with_ddp", False):
+                raise RuntimeError("Gradient feature export requires FSDP to be disabled.")
+            if self.ema_model is not None:
+                raise RuntimeError("Gradient feature export is incompatible with EMA inference.")
+            grad_wrt_pattern = str(cf.get("tarot_grad_wrt", ""))
+            grad_wrt_re = re.compile(grad_wrt_pattern) if grad_wrt_pattern else None
+            grad_param_names = {
+                name
+                for name, _ in self.model.named_parameters()
+                if grad_wrt_re is None or grad_wrt_re.search(name)
+            }
+            grad_dim = sum(
+                p.numel() for name, p in self.model.named_parameters() if name in grad_param_names
+            )
+            if grad_dim == 0:
+                raise ValueError(f"No parameters matched tarot_grad_wrt='{grad_wrt_pattern}'.")
+            projector = self._init_tarot_gradient_projector(
+                grad_dim,
+                int(cf.get("tarot_grad_proj_dim", 512)),
+                int(cf.get("tarot_grad_proj_seed", 0)),
+                f"cuda:{cf.local_rank}",
+            )
+
+        # Accumulation buffers
+        feature_records = {}
+        if export_features:
+            feature_records["idx"] = []
+            feature_records["idx_time_ns"] = []
+            if export_global_idx:
+                feature_records["idx_global"] = []
+        if export_latent:
+            for pooling in feature_poolings:
+                feature_records[f"feat_{pooling}"] = []
+        if export_gradients:
+            feature_records["feat_grad_projected"] = []
+
+        grad_ctx = contextlib.nullcontext() if export_gradients else torch.no_grad()
+        with grad_ctx:
             # print progress bar but only in interactive mode, i.e. when without ddp
-            with tqdm.tqdm(
-                total=len(self.data_loader_validation), disable=self.cf.with_ddp
-            ) as pbar:
+            with tqdm.tqdm(total=len(self.data_loader_validation), disable=self.cf.with_ddp) as pbar:
                 for bidx, batch in enumerate(dataset_val_iter):
                     if cf.data_loading.get("memory_pinning", False):
-                        # pin memory for faster CPU-GPU transfer
                         batch = batch.pin_memory()
 
+                    sample_idxs = self._get_batch_sample_indices(batch)
+                    sample_time_ns = self._sample_indices_to_time_ns(sample_idxs)
+
                     batch.to_device(self.device)
+                    if export_gradients:
+                        self.model.zero_grad(set_to_none=True)
+                        self.model_params.zero_grad(set_to_none=True)
 
                     # evaluate model
                     with torch.autocast(
@@ -571,16 +784,26 @@ class Trainer(TrainerBase):
                         dtype=self.mixed_precision_dtype,
                         enabled=cf.with_mixed_precision,
                     ):
-                        if self.ema_model is None:
-                            preds = self.model(
-                                self.model_params,
-                                batch.get_source_samples(),
-                            )
+                        if export_latent:
+                            if self.ema_model is None:
+                                preds, global_tokens = self.model(
+                                    self.model_params,
+                                    batch.get_source_samples(),
+                                    return_global_tokens=True,
+                                )
+                            else:
+                                preds, global_tokens = self.ema_model.forward_eval(
+                                    self.model_params,
+                                    batch.get_source_samples(),
+                                    return_global_tokens=True,
+                                )
                         else:
-                            preds = self.ema_model.forward_eval(
-                                self.model_params,
-                                batch.get_source_samples(),
-                            )
+                            if self.ema_model is None:
+                                preds = self.model(self.model_params, batch.get_source_samples())
+                            else:
+                                preds = self.ema_model.forward_eval(
+                                    self.model_params, batch.get_source_samples()
+                                )
 
                         targets_and_auxs = {}
                         for loss_name, target_aux in self.target_and_aux_calculators_val.items():
@@ -592,21 +815,57 @@ class Trainer(TrainerBase):
                                 self.model,
                             )
 
-                    _ = self.loss_calculator_val.compute_loss(
-                        preds=preds,
-                        targets_and_aux=targets_and_auxs,
-                        metadata=extract_batch_metadata(batch),
-                    )
+                        loss = self.loss_calculator_val.compute_loss(
+                            preds=preds,
+                            targets_and_aux=targets_and_auxs,
+                            metadata=extract_batch_metadata(batch),
+                        )
 
-                    # log output
-                    if bidx < num_samples_write:
-                        # denormalization function for data
+                    # ---- Latent feature collection ----
+                    if export_latent:
+                        features_mean = global_tokens.mean(dim=1).to(torch.float32).cpu().numpy()
+                        features_mean = self._repeat_features_to_match_batch(features_mean, sample_idxs.shape[0])
+                        feature_records["idx"].append(sample_idxs)
+                        feature_records["idx_time_ns"].append(sample_time_ns)
+                        if export_global_idx:
+                            feature_records["idx_global"].append(_time_ns_to_global_idx_checked(sample_time_ns))
+                        if "mean" in feature_poolings:
+                            feature_records["feat_mean"].append(features_mean)
+                        if "mean_std" in feature_poolings:
+                            features_std = global_tokens.std(dim=1, unbiased=False).to(torch.float32).cpu().numpy()
+                            features_std = self._repeat_features_to_match_batch(features_std, sample_idxs.shape[0])
+                            feature_records["feat_mean_std"].append(np.concatenate([features_mean, features_std], axis=-1))
+
+                    # ---- Gradient feature collection ----
+                    if export_gradients:
+                        loss.backward()
+                        grad_parts = []
+                        for name, param in self.model.named_parameters():
+                            if name not in grad_param_names:
+                                continue
+                            if param.grad is None:
+                                grad_parts.append(torch.zeros_like(param, device=param.device).flatten())
+                            else:
+                                grad_parts.append(param.grad.detach().flatten())
+                        grad_vec = torch.cat(grad_parts)
+                        projected = projector.project(grad_vec.unsqueeze(0), model_id=0)
+                        projected = projected.to(torch.float32).cpu().numpy()
+                        projected = self._repeat_features_to_match_batch(projected, sample_idxs.shape[0])
+                        feature_records["idx"].append(sample_idxs)
+                        feature_records["idx_time_ns"].append(sample_time_ns)
+                        if export_global_idx:
+                            feature_records["idx_global"].append(_time_ns_to_global_idx_checked(sample_time_ns))
+                        feature_records["feat_grad_projected"].append(projected)
+                        self.model.zero_grad(set_to_none=True)
+                        self.model_params.zero_grad(set_to_none=True)
+
+                    # ---- Loss computation and optional zarr output ----
+                    if bidx < num_samples_write and not export_features_only:
                         denormalize_data_fct = (
                             (lambda x0, x1: x1)
                             if mode_cfg.get("output", {}).get("normalized_samples", False)
                             else self.dataset_val.denormalize_target_channels
                         )
-                        # write output
                         write_output(
                             self.cf,
                             mode_cfg,
@@ -620,15 +879,18 @@ class Trainer(TrainerBase):
                         )
 
                     pbar.update(batch_size)
-
                     if (bidx * batch_size) > mode_cfg.samples_per_mini_epoch:
                         break
 
                 self._log_terminal(0, mini_epoch, VAL)
                 self._log(VAL)
 
-        # avoid that there is a systematic bias in the validation subset
         self.dataset_val.advance()
+        if export_features and feature_records.get("idx"):
+            feature_export = {key: np.concatenate(val, axis=0) for key, val in feature_records.items()}
+            out_file = config.get_path_run(cf) / f"tarot_features_chkpt{mini_epoch:05d}_rank{cf.rank:04d}.npz"
+            np.savez(out_file, **feature_export)
+            logger.info("Saved TAROT features to %s", out_file)
 
     def _get_full_model_state_dict(self):
         maybe_sharded_sd = (
