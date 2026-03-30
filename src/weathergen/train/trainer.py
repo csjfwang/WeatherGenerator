@@ -648,7 +648,7 @@ class Trainer(TrainerBase):
         try:
             from tarot.projectors import CudaProjector, ProjectionType
 
-            return CudaProjector(
+            proj = CudaProjector(
                 grad_dim=grad_dim,
                 proj_dim=proj_dim,
                 seed=proj_seed,
@@ -656,14 +656,17 @@ class Trainer(TrainerBase):
                 device=device,
                 max_batch_size=8,
             )
-        except Exception:
+            logger.info("TAROT gradient projector: CudaProjector (grad_dim=%d, proj_dim=%d)", grad_dim, proj_dim)
+            return proj
+        except Exception as e:
+            logger.debug("CudaProjector unavailable: %s", e)
             try:
                 from tarot.projectors import BasicProjector, ProjectionType
 
                 max_proj_bytes = 2 * 1024**3
                 safe_block = max(1, int(max_proj_bytes / (grad_dim * 4)))
                 block_size = min(safe_block, proj_dim)
-                return BasicProjector(
+                proj = BasicProjector(
                     grad_dim=grad_dim,
                     proj_dim=proj_dim,
                     seed=proj_seed,
@@ -672,10 +675,14 @@ class Trainer(TrainerBase):
                     block_size=block_size,
                     dtype=torch.float32,
                 )
-            except Exception:
+                logger.info("TAROT gradient projector: BasicProjector (grad_dim=%d, proj_dim=%d, block_size=%d)", grad_dim, proj_dim, block_size)
+                return proj
+            except Exception as e2:
+                logger.debug("BasicProjector unavailable: %s", e2)
                 max_proj_bytes = 2 * 1024**3
                 safe_block = max(1, int(max_proj_bytes / (grad_dim * 4)))
                 block_size = min(safe_block, proj_dim)
+                logger.info("TAROT gradient projector: _LocalRademacherProjector (grad_dim=%d, proj_dim=%d, block_size=%d)", grad_dim, proj_dim, block_size)
                 return _LocalRademacherProjector(
                     grad_dim_=grad_dim,
                     proj_dim_=proj_dim,

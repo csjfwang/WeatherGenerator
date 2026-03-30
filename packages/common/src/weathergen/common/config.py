@@ -341,8 +341,9 @@ def _check_logging(config: Config) -> Config:
     """
     config = config.copy()
     if config.get("train_logging") is None:  # TODO remove this for next version
+        legacy_interval = config.get("log_interval", 20)
         config.train_logging = OmegaConf.create(
-            {"checkpoint": 250, "terminal": 10, "metrics": config.train_logging.log_interval}
+            {"checkpoint": 250, "terminal": 10, "metrics": legacy_interval, "log_grad_norms": False}
         )
 
     return config
