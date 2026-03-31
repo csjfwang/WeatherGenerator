@@ -106,6 +106,30 @@ class Masker:
                     distance to ensure spatial contiguity. For DINO/JEPA/IBOT.
                     e.g. masking_strategy_config = {"hl_mask": 0, "method": "geodesic_disk"}
                     method: "disk" (neighbor growth), "random_walk", or "geodesic_disk" (circular)
+        "satellite_swath" - simulate polar-orbiting satellite ground tracks. Each orbit produces
+                    a swath that is a diagonal band in lat-lon space: the Earth rotates beneath
+                    the satellite, so consecutive pole-to-pole passes shift westward in longitude.
+                    Cells within swath_width_deg of any pass centerline are kept; all others are
+                    masked. Unlike purely zonal or purely meridional stripes, swaths span the full
+                    latitude range while varying in longitude, forcing the model to learn both
+                    zonal and meridional structure simultaneously.
+                    e.g. masking_strategy_config = {"num_swaths": 5, "swath_width_deg": 20,
+                                                     "orbit_drift_deg": -25}
+                    num_swaths: number of orbital passes (each at a random starting longitude)
+                    swath_width_deg: total width of each swath in great-circle degrees at equator
+                    orbit_drift_deg: longitude drift from south to north pole (~-25 for LEO polar)
+        "satellite_swath_sparse" - like satellite_swath but with more, thinner swaths and
+                    random subsampling within each swath footprint (at rate keep_rate).
+                    Cells outside all swaths are always masked; cells inside swaths are kept
+                    with probability rate. Combines orbital spatial structure with random dropout
+                    inside each pass — forcing the model to handle both geographic coverage gaps
+                    and fine-grained sparse observations simultaneously.
+                    e.g. masking_strategy_config = {"num_swaths": 12, "swath_width_deg": 10,
+                                                     "orbit_drift_deg": -25, "rate": 0.6}
+                    num_swaths: number of orbital passes (more passes, thinner → denser coverage)
+                    swath_width_deg: total swath width in great-circle degrees at equator
+                    orbit_drift_deg: longitude drift from south to north pole
+                    rate: fraction of in-swath cells to keep (rate_sampling supported)
         masking_rate_sampling (bool): Whether to sample the masking rate from a distribution.
         masking_strategy_config (dict): Configuration for the masking strategy, can include
                                         additional parameters like "hl_mask", etc.
@@ -135,6 +159,30 @@ class Masker:
         Reset rng after mini_epoch to ensure proper randomization
         """
         self.rng = rng
+
+    def _get_cell_coords(self) -> tuple[NDArray, NDArray]:
+        """Return (lats, lons) in degrees for every HEALPix cell (cached).
+
+        lats: [-90, 90], lons: [-180, 180].
+        Uses NESTED ordering to match the data pipeline.
+        Computed once and reused across all masking calls.
+        """
+        if not hasattr(self, "_cell_coords_cache"):
+            nside = 2 ** self.healpix_level_data
+            all_idx = np.arange(self.healpix_num_cells)
+            lonlat = hp.healpix_to_lonlat(all_idx, nside, order="nested")
+            lon, lat = lonlat[0], lonlat[1]
+            # astropy returns Angle objects; .value gives radians
+            lat_rad = lat.value if hasattr(lat, "value") else lat
+            lon_rad = lon.value if hasattr(lon, "value") else lon
+            lats = np.degrees(lat_rad)                      # [-90, 90]
+            lons = (np.degrees(lon_rad) + 180.0) % 360.0 - 180.0  # [-180, 180]
+            self._cell_coords_cache = (lats, lons)
+        return self._cell_coords_cache
+
+    def _get_cell_lats(self) -> NDArray:
+        """Return latitude in degrees [-90, 90] for every HEALPix cell (cached)."""
+        return self._get_cell_coords()[0]
 
     def merge_masking_config(self, mode_cfg, override):
         """Merge a stream's masking override into the base mode config.
@@ -552,7 +600,7 @@ class Masker:
             mask = self.rng.uniform(0, 1, num_cells) < keep_rate
 
         elif "forecast" in strategy or strategy == "causal":
-            mask = np.ones(num_cells, dtype=np.bool)
+            mask = np.ones(num_cells, dtype=bool)
 
             if "diffusion_rn" in masking_strategy_config:
                 masking_params["noise_level_rn"] = self.rng.normal(0.0, 1.0)
@@ -598,6 +646,101 @@ class Masker:
                     center_cell=None,
                     method=method,
                 )
+
+        elif strategy == "satellite_swath":
+            num_swaths = int(masking_strategy_config.get("num_swaths", 5))
+            swath_half_width = float(masking_strategy_config.get("swath_width_deg", 20.0)) / 2.0
+            # Longitude drift from south pole to north pole during one ascending half-orbit.
+            # A typical LEO polar orbit drifts ~-25° westward across one pole-to-pole pass
+            # because the Earth rotates ~12.5° during the ~50-minute half-orbit.
+            orbit_drift_deg = float(masking_strategy_config.get("orbit_drift_deg", -25.0))
+
+            cell_lats, cell_lons = self._get_cell_coords()
+
+            mask = np.zeros(num_cells, dtype=bool)
+
+            # Each swath starts at a random longitude at the south pole and drifts
+            # orbit_drift_deg westward by the time it reaches the north pole.
+            start_lons = self.rng.uniform(-180.0, 180.0, num_swaths)
+            for start_lon in start_lons:
+                # Centerline longitude at each cell's latitude:
+                # linear interpolation from start_lon (lat=-90) to start_lon+orbit_drift (lat=90)
+                swath_lon = start_lon + orbit_drift_deg * (cell_lats + 90.0) / 180.0
+
+                # Longitude difference wrapped to [-180, 180]
+                dlon = cell_lons - swath_lon
+                dlon = (dlon + 180.0) % 360.0 - 180.0
+
+                # Distance in longitude-space (NOT scaled by cos(lat)).
+                # Scaling by cos(lat) would make dist→0 near the poles, causing every cell
+                # near the poles to fall inside every swath — destroying the stripe pattern.
+                # Constant lon-space width produces clear diagonal bands in lat-lon scatter plots.
+                mask |= np.abs(dlon) < swath_half_width
+
+            masking_params["num_swaths"] = num_swaths
+            masking_params["swath_start_lons"] = start_lons.tolist()
+
+        elif strategy == "satellite_swath_sparse":
+            # Like satellite_swath but with more, thinner swaths and random subsampling
+            # within the swath footprint. Combines orbital spatial structure with random
+            # dropout inside each swath — the model sees a sparse random pattern that is
+            # geographically structured rather than uniformly distributed.
+            num_swaths = int(masking_strategy_config.get("num_swaths", 12))
+            swath_half_width = float(masking_strategy_config.get("swath_width_deg", 10.0)) / 2.0
+            orbit_drift_deg = float(masking_strategy_config.get("orbit_drift_deg", -25.0))
+            keep_rate = self._get_sampling_rate(masking_strategy_config)
+
+            cell_lats, cell_lons = self._get_cell_coords()
+
+            # Pass 1: determine which cells fall within any swath footprint.
+            # Use raw longitude difference (no cos(lat) scaling) so swaths appear as
+            # clear diagonal bands at all latitudes in the scatter-plot visualization.
+            in_swath = np.zeros(num_cells, dtype=bool)
+            start_lons = self.rng.uniform(-180.0, 180.0, num_swaths)
+            for start_lon in start_lons:
+                swath_lon = start_lon + orbit_drift_deg * (cell_lats + 90.0) / 180.0
+                dlon = cell_lons - swath_lon
+                dlon = (dlon + 180.0) % 360.0 - 180.0
+                in_swath |= np.abs(dlon) < swath_half_width
+
+            # Pass 2: random subsampling within the swath footprint at keep_rate
+            cell_draw = self.rng.uniform(0.0, 1.0, num_cells)
+            mask = in_swath & (cell_draw < keep_rate)
+
+            masking_params["num_swaths"] = num_swaths
+            masking_params["swath_start_lons"] = start_lons.tolist()
+
+        elif strategy == "mixed":
+            strategies = list(masking_strategy_config.get("strategies", ["random", "healpix"]))
+            raw_weights = masking_strategy_config.get("strategy_weights", None)
+            if raw_weights is not None:
+                w = np.array([raw_weights.get(s, 1.0) for s in strategies], dtype=float)
+                w /= w.sum()
+            else:
+                w = None
+
+            chosen_idx = self.rng.choice(len(strategies), p=w)
+            chosen = strategies[chosen_idx]
+            masking_params["chosen_strategy"] = chosen
+
+            # Build sub-config: start from mixed config, then apply per-strategy overrides
+            strategy_cfgs = masking_strategy_config.get("strategy_configs", {})
+            sub_cfg = {**masking_strategy_config, **strategy_cfgs.get(chosen, {})}
+
+            # For healpix-family strategies: sample hl_mask level from the configured list
+            if "hl_mask_levels" in masking_strategy_config and "hl_mask" not in strategy_cfgs.get(
+                chosen, {}
+            ):
+                hl_mask_levels = list(masking_strategy_config["hl_mask_levels"])
+                hl_mask = hl_mask_levels[self.rng.integers(0, len(hl_mask_levels))]
+                sub_cfg["hl_mask"] = hl_mask
+                masking_params["hl_mask"] = hl_mask
+
+            # Recursive dispatch — returns a bool tensor; convert back to numpy for the
+            # to_bool_tensor() call at the bottom of this method
+            sub_mask, sub_params = self._generate_cell_mask(num_cells, chosen, sub_cfg)
+            masking_params.update(sub_params)
+            mask = sub_mask.numpy()  # sub_mask is CPU bool tensor from recursive call
 
         else:
             raise NotImplementedError(
