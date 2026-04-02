@@ -1,0 +1,315 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Masked Autoencoder (MAE) config.
+# - Model size matches config_jepa.yml
+# - Physical loss only (no student-teacher)
+# - Pure reconstruction: no forecasting steps
+# - All masking strategies documented below; only "random" is active by default
+
+embed_orientation: "channels"
+embed_unembed_mode: "block"
+embed_dropout_rate: 0.1
+
+ae_local_dim_embed: 1024
+ae_local_num_blocks: 4
+ae_local_num_heads: 16
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 1
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 16
+ae_adapter_embed: 128
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+ae_global_dim_embed: 2048
+ae_global_num_blocks: 2
+ae_global_num_heads: 32
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+# TODO: switching to < 1 triggers triton-related issues.
+# See https://github.com/ecmwf/WeatherGenerator/issues/1050
+ae_global_att_dense_rate: 1.0
+ae_global_block_factor: 64
+ae_global_mlp_hidden_factor: 2
+ae_global_trailing_layer_norm: False
+
+ae_aggregation_num_blocks: 8
+ae_aggregation_num_heads: 32
+ae_aggregation_dropout_rate: 0.1
+ae_aggregation_with_qk_lnorm: True
+ae_aggregation_att_dense_rate: 1.0
+ae_aggregation_block_factor: 64
+ae_aggregation_mlp_hidden_factor: 2
+
+decoder_type: PerceiverIOCoordConditioning
+pred_adapter_kv: False
+pred_self_attention: True
+pred_dyadic_dims: False
+pred_mlp_adaln: True
+num_class_tokens: 1
+num_register_tokens: 7
+
+# number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
+# one is training an auto-encoder
+fe_num_blocks: 6
+fe_num_heads: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+fe_layer_norm_after_blocks: []  # Index starts at 0. Thus, [3] adds a LayerNorm after the fourth layer
+fe_impute_latent_noise_std: 0.0
+# currently fixed to 1.0 (due to limitations with flex_attention and triton)
+forecast_att_dense_rate: 1.0
+with_step_conditioning: True
+
+healpix_level: 5
+# Use 2D RoPE instead of traditional global positional encoding
+rope_2D: False
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: False
+ddp_find_unused_parameters: False
+attention_dtype: bf16
+mixed_precision_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+latent_noise_kl_weight: 0.0
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True
+
+freeze_modules: ""
+
+norm_type: "LayerNorm"
+# type of zarr_store
+zarr_store: "zip" # "zarr" for LocalStore, "zip" for ZipStore
+
+#####################################
+
+streams_directory: "./config/streams/era5_1deg/"
+streams: ???
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  multiprocessing_method: "fork"
+
+  desc: ""
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+  log_grad_norms: False
+
+# parameters for data loading
+data_loading:
+
+  num_workers: 12
+  rng_seed: ???
+  repeat_data_in_mini_epoch: False
+
+
+# config for training
+training_config:
+
+  # training_mode: "masking", "student_teacher", "latent_loss"
+  training_mode: ["masking"]
+
+  num_mini_epochs: 64
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  start_date: 1979-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  time_window_step: 06:00:00
+  time_window_len: 06:00:00
+
+  # Pure reconstruction: no offset, no forecast steps
+  window_offset_prediction: 0
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 5e-5
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "constant"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      # parameters are scaled by number of DDP workers
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  losses: {
+    "physical": {
+        type: LossPhysical,
+        loss_fcts: { "mse": { }, },
+        },
+    }
+
+  # ---------------------------------------------------------------------------
+  # Masking strategies for MAE reconstruction.
+  # Only one strategy should be active at a time in model_input.
+  # All strategies are documented below with their full parameter sets.
+  # ---------------------------------------------------------------------------
+  #
+  # [1] RANDOM — independently mask each cell with a fixed keep rate
+  #     masking_strategy: "random"
+  #     masking_strategy_config:
+  #       rate: 0.6           # fraction of cells to keep (0.0–1.0)
+  #       rate_sampling: False  # if True, sample keep-rate from a normal distribution each batch
+  #       diffusion_rn: False   # if True, sample a noise level param (for diffusion models)
+  #
+  # [2] HEALPIX — mask entire HEALPix parent cells at a coarser level
+  #     masking_strategy: "healpix"
+  #     masking_strategy_config:
+  #       rate: 0.3           # fraction of parent cells to keep
+  #       hl_mask: 3          # HEALPix level to mask at (must be <= healpix_level)
+  #       rate_sampling: False
+  #
+  # [3] CROPPING (HEALPIX) — keep one spatially contiguous region, mask the rest
+  #     masking_strategy: "cropping_healpix"
+  #     masking_strategy_config:
+  #       rate: 0.4           # fraction of cells inside the kept region
+  #       hl_mask: 0          # HEALPix level for region selection
+  #       method: "geodesic_disk"  # "disk" | "random_walk" | "geodesic_disk"
+  #       rate_sampling: False
+  #
+  # [4] SATELLITE SWATH — simulate polar-orbit satellite ground tracks
+  #     masking_strategy: "satellite_swath"
+  #     masking_strategy_config:
+  #       num_swaths: 5         # number of orbital passes
+  #       swath_width_deg: 20.0 # swath width in great-circle degrees at equator
+  #       orbit_drift_deg: -25.0  # longitude drift S-pole → N-pole (negative = westward)
+  #
+  # [5] SATELLITE SWATH SPARSE — swath mask + random subsampling within the swath
+  #     masking_strategy: "satellite_swath_sparse"
+  #     masking_strategy_config:
+  #       num_swaths: 12        # more passes → denser coverage
+  #       swath_width_deg: 10.0
+  #       orbit_drift_deg: -25.0
+  #       rate: 0.6             # fraction of in-swath cells to keep
+  #       rate_sampling: False
+  #
+  # [6] MIXED — randomly select one sub-strategy per sample (weighted)
+  #     masking_strategy: "mixed"
+  #     masking_strategy_config:
+  #       strategies:
+  #         - "random"
+  #         - "healpix"
+  #         - "cropping_healpix"
+  #         - "satellite_swath"
+  #         - "satellite_swath_sparse"
+  #       strategy_weights:          # optional; uniform if omitted
+  #         random: 1.0
+  #         healpix: 1.0
+  #         cropping_healpix: 1.0
+  #         satellite_swath: 1.0
+  #         satellite_swath_sparse: 1.0
+  #       strategy_configs:          # optional per-strategy overrides
+  #         random:
+  #           rate: 0.6
+  #         healpix:
+  #           rate: 0.3
+  #           hl_mask: 3
+  #         cropping_healpix:
+  #           rate: 0.4
+  #           hl_mask: 0
+  #           method: "geodesic_disk"
+  #         satellite_swath:
+  #           num_swaths: 5
+  #           swath_width_deg: 20.0
+  #         satellite_swath_sparse:
+  #           num_swaths: 12
+  #           swath_width_deg: 10.0
+  #           rate: 0.6
+  #       hl_mask_levels: [0, 1, 2, 3]  # HEALPix levels to randomly sample for healpix-family strategies
+  # ---------------------------------------------------------------------------
+
+  model_input: {
+    "mae_random": {
+      # DEFAULT: random masking — swap masking_strategy to test other approaches (see comments above)
+      masking_strategy: "random",
+      num_samples: 1,
+      num_steps_input: 1,
+      masking_strategy_config: {
+        rate: 0.7,
+        rate_sampling: False,
+        diffusion_rn: False,
+      },
+    },
+  }
+
+  # No forecasting: pure reconstruction only
+  forecast:
+    time_step: 00:00:00
+    num_steps: 0
+    policy: null
+
+
+# validation config; full validation config is merge of training and validation config
+validation_config:
+
+  samples_per_mini_epoch: 256
+  shuffle: False
+
+  start_date: 2023-10-01T00:00
+  end_date: 2023-12-31T00:00
+
+  # whether to track the exponential moving average of weights for validation
+  validate_with_ema:
+    enabled: False
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 1e-3
+
+  # parameters for validation samples that are written to disk
+  output: {
+    # number of samples that are written
+    num_samples: 0,
+    # write samples in normalized model space
+    normalized_samples: False,
+    # output streams to write; default all
+    streams: null,
+  }
+
+  # run validation before training starts (mainly for model development)
+  validate_before_training: False
+
+
+# Tags for experiment tracking
+wgtags:
+  org: null
+  issue: null
+  exp: null
+  grid: null
