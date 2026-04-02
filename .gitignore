@@ -228,3 +228,9 @@ output
 models
 results
 reports
+
+# branch-local generated / personal files
+config/sweep_runs/
+.claude/
+scripts/sweeps/week4/
+CLAUDE.md
