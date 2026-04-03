@@ -380,6 +380,18 @@ def main():
             "If omitted, score is kept in RAM."
         ),
     )
+    parser.add_argument(
+        "--save-score-analysis",
+        action="store_true",
+        default=False,
+        help="Save score analysis sidecar file with features, aggregated scores, and OT weights.",
+    )
+    parser.add_argument(
+        "--save-all-candidate-feat",
+        action="store_true",
+        default=False,
+        help="Save whitened+normalized features for ALL candidates (not just selected).",
+    )
     args = parser.parse_args()
 
     if not (0.0 < args.ratio <= 1.0):
@@ -446,6 +458,8 @@ def main():
         )
 
     score = None
+    score_stats = None
+    ot_weights = None
     try:
         # cand_feat_norm / tgt_feat_norm are whitened + L2-normalized,
         # matching the features returned by WFDEstimator.get_wfd().
@@ -464,13 +478,24 @@ def main():
             "data_weighting": False,
         }
         selector = DataSelector(cfg)
-        selected_pos, _ = selector.select_data(
+        selected_pos, ot_weights = selector.select_data(
             score, torch.from_numpy(cand_feat_norm), torch.from_numpy(tgt_feat_norm)
         )
         selected_pos = np.asarray(selected_pos, dtype=np.int64)
+        ot_weights = np.asarray(ot_weights, dtype=np.float32)
         selected_ids_raw = cand_loaded.ids[selected_pos]
         selected_ids, unique_pos = np.unique(selected_ids_raw, return_index=True)
+        ot_weights = ot_weights[unique_pos]
         selected_pos_unique = selected_pos[unique_pos]
+        if args.save_score_analysis and score is not None:
+            # Force a copy so score stats remain available after memmap cleanup.
+            selected_scores = np.asarray(score[selected_pos_unique])
+            score_stats = {
+                "score_mean_to_target": selected_scores.mean(axis=1),
+                "score_max_to_target": selected_scores.max(axis=1),
+                "score_min_to_target": selected_scores.min(axis=1),
+            }
+            del selected_scores
         selected_idx_local = cand_loaded.idx_local[selected_pos_unique]
         selected_idx_time_ns = cand_loaded.idx_time_ns[selected_pos_unique]
         selected_idx_global = cand_loaded.idx_global[selected_pos_unique]
@@ -500,6 +525,29 @@ def main():
         candidate_paths=np.asarray(cand_loaded.paths, dtype=str),
         id_mode=np.asarray([cand_loaded.id_mode]),
     )
+
+    if args.save_score_analysis:
+        analysis_path = out_path.with_suffix(".score_analysis.npz")
+        analysis_data = {
+            "selected_id": selected_ids,
+            "selected_feat": cand_feat_norm[selected_pos_unique],
+            "target_id": tgt_loaded.ids,
+            "target_feat": tgt_feat_norm,
+            "ot_weights": ot_weights,
+        }
+        if score_stats is not None:
+            analysis_data.update(score_stats)
+        np.savez(analysis_path, **analysis_data)
+        print(f"Saved score analysis to {analysis_path}.")
+
+    if args.save_all_candidate_feat:
+        all_feat_path = out_path.with_suffix(".all_candidate_feat.npz")
+        np.savez(
+            all_feat_path,
+            candidate_id=cand_loaded.ids,
+            candidate_feat=cand_feat_norm,
+        )
+        print(f"Saved all candidate features ({cand_feat_norm.shape}) to {all_feat_path}.")
 
     # Optional: produce training-ready global indices.
     if args.output_global_idx is not None:

@@ -39,19 +39,23 @@ date
 echo "Number of Nodes: $SLURM_JOB_NUM_NODES"
 echo "Number of Tasks: $SLURM_NTASKS"
 
-srun --ntasks=1 uv run --offline --no-sync python scripts/select_tarot_indices.py \
-  --candidate "/p/scratch/weatherai/shared_work/results/tarot_feat_cand_grad_full_s*/tarot_features_chkpt*_rank*.npz" \
-  --target "/p/scratch/weatherai/shared_work/results/tarot_feat_tgt_grad_full_s*/tarot_features_chkpt*_rank*.npz" \
-  --feature grad_projected \
-  --method fixed_size \
-  --ratio 0.2 \
-  --dedup-policy mean \
-  --score-block-size 4096 \
-  --output TAROT/selected_ids_train_full.npy \
-  --output-global-idx TAROT/selected_indices_train_full.npy \
-  --global-index-origin 1979-01-01 \
-  --global-index-step-hours 6 \
-  --candidate-shard-start-dates "1979-01-01,1984-04-01,1989-07-01,1994-10-01,2000-01-01,2005-04-01,2010-07-01,2015-10-01"
+CANDIDATE_RUN_ID="${CANDIDATE_RUN_ID:?Please pass CANDIDATE_RUN_ID, e.g. sbatch --export=ALL,CANDIDATE_RUN_ID=l6rog843,TARGET_RUN_ID_PREFIX=tarot_feat_tgt_grad_l6rog843,OUTPUT_TAG=tarot_2022_l6rog843 weathergen_select_tarot_indices.sbatch}"
+TARGET_RUN_ID_PREFIX="${TARGET_RUN_ID_PREFIX:?Please pass TARGET_RUN_ID_PREFIX, e.g. tarot_feat_tgt_grad_l6rog843 or tarot_feat_tgt_grad_2023_l6rog843}"
+OUTPUT_TAG="${OUTPUT_TAG:?Please pass OUTPUT_TAG, e.g. tarot_2022_l6rog843 or tarot_2023_l6rog843}"
+CANDIDATE_GLOB="/p/scratch/weatherai/shared_work/results/tarot_feat_cand_grad_${CANDIDATE_RUN_ID}_s*/tarot_features_chkpt*_rank*.npz"
+TARGET_GLOB="/p/scratch/weatherai/shared_work/results/${TARGET_RUN_ID_PREFIX}_s*/tarot_features_chkpt*_rank*.npz"
+SELECTED_IDS_OUT="TAROT/${OUTPUT_TAG}_selected_ids_train_full.npy"
+SELECTED_GLOBAL_IDX_OUT="TAROT/${OUTPUT_TAG}_selected_indices_train_full.npy"
+
+echo "CANDIDATE_RUN_ID=${CANDIDATE_RUN_ID}"
+echo "TARGET_RUN_ID_PREFIX=${TARGET_RUN_ID_PREFIX}"
+echo "OUTPUT_TAG=${OUTPUT_TAG}"
+echo "CANDIDATE_GLOB=${CANDIDATE_GLOB}"
+echo "TARGET_GLOB=${TARGET_GLOB}"
+echo "SELECTED_IDS_OUT=${SELECTED_IDS_OUT}"
+echo "SELECTED_GLOBAL_IDX_OUT=${SELECTED_GLOBAL_IDX_OUT}"
+
+srun --ntasks=1 uv run --offline --no-sync python scripts/select_tarot_indices.py   --candidate "${CANDIDATE_GLOB}"   --target "${TARGET_GLOB}"   --feature grad_projected   --method fixed_size   --ratio 0.2   --dedup-policy mean   --score-block-size 4096   --output "${SELECTED_IDS_OUT}"   --output-global-idx "${SELECTED_GLOBAL_IDX_OUT}"   --global-index-origin 1979-01-01   --global-index-step-hours 6   --save-score-analysis
 
 rc=$?
 if [ "${rc}" -ne 0 ]; then

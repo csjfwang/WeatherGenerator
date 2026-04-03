@@ -63,8 +63,8 @@ STREAM="${STREAM:-ERA5}"
 
 # Split the TAROT target interval [2022-01-01, 2023-01-01) into four sub-intervals.
 suffixes=(s00 s01 s02 s03)
-starts=(2022-01-01 2022-04-01 2022-07-01 2022-10-01)
-ends=(2022-04-01 2022-07-01 2022-10-01 2023-01-01)
+starts=(2023-01-01 2023-04-01 2023-07-01 2023-10-01)
+ends=(2023-04-01 2023-07-01 2023-10-01 2023-12-31)
 
 shard_indices=(0 1 2 3)
 
