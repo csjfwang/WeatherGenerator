@@ -60,15 +60,17 @@ export UV_CACHE_DIR=/p/project1/weatherai/uv_cache_shared
 FROM_RUN_ID="${FROM_RUN_ID:-l6rog843}"
 RUN_ID_PREFIX="${RUN_ID_PREFIX:-tarot_feat_tgt_grad_${FROM_RUN_ID}}"
 STREAM="${STREAM:-ERA5}"
+TAROT_LOSS_CHANNEL_GROUP="${TAROT_LOSS_CHANNEL_GROUP:-}"
 
-# Split the TAROT target interval [2022-01-01, 2023-01-01) into four sub-intervals.
+# Split the TAROT target interval [2023-01-01, 2024-01-01) into four sub-intervals.
 suffixes=(s00 s01 s02 s03)
 starts=(2023-01-01 2023-04-01 2023-07-01 2023-10-01)
-ends=(2023-04-01 2023-07-01 2023-10-01 2023-12-31)
+ends=(2023-04-01 2023-07-01 2023-10-01 2024-01-01)
 
 shard_indices=(0 1 2 3)
 
 echo "Will run shard indices: ${shard_indices[*]}"
+echo "TAROT_LOSS_CHANNEL_GROUP=${TAROT_LOSS_CHANNEL_GROUP}"
 
 
 run_one_shard() {
@@ -88,22 +90,28 @@ run_one_shard() {
       fi
       echo "Shard '"${suffix}"' on host $(hostname) CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
       nvidia-smi -L
-      uv run --offline --no-sync inference \
-        --from-run-id="'"${FROM_RUN_ID}"'" \
-        --run-id="'"${run_id}"'" \
-        --start-date="'"${start_date}"'" \
-        --end-date="'"${end_date}"'" \
-        --streams-output "'"${STREAM}"'" \
-        --options \
-          sampling_rate_target=1.0 \
-          shuffle=False \
-          with_fsdp=False \
-          validate_with_ema=False \
-          tarot_export_features=True \
-          tarot_export_features_only=True \
-          tarot_feature_mode=gradient \
-          tarot_grad_proj_dim=2048 \
-          tarot_grad_proj_seed=0
+      cmd=(
+        uv run --offline --no-sync inference
+          --from-run-id="'"${FROM_RUN_ID}"'"
+          --run-id="'"${run_id}"'"
+          --start-date="'"${start_date}"'"
+          --end-date="'"${end_date}"'"
+          --streams-output "'"${STREAM}"'"
+          --options
+            sampling_rate_target=1.0
+            shuffle=False
+            with_fsdp=False
+            validate_with_ema=False
+            tarot_export_features=True
+            tarot_export_features_only=True
+            tarot_feature_mode=gradient
+            tarot_grad_proj_dim=2048
+            tarot_grad_proj_seed=0
+      )
+      if [ -n "'"${TAROT_LOSS_CHANNEL_GROUP}"'" ]; then
+        cmd+=(tarot_loss_channel_group="'"${TAROT_LOSS_CHANNEL_GROUP}"'")
+      fi
+      "${cmd[@]}"
     ' 2>&1 | sed "s/^/[${suffix}] /" &
 }
 

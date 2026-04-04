@@ -60,6 +60,7 @@ set -euo pipefail
 FROM_RUN_ID="${FROM_RUN_ID:-l6rog843}"
 RUN_ID_PREFIX="${RUN_ID_PREFIX:-tarot_feat_cand_grad_${FROM_RUN_ID}}"
 STREAM="${STREAM:-ERA5}"
+TAROT_LOSS_CHANNEL_GROUP="${TAROT_LOSS_CHANNEL_GROUP:-}"
 START_YEAR="${START_YEAR:-1979}"
 END_YEAR_INCLUSIVE="${END_YEAR_INCLUSIVE:-2022}"
 FINAL_END_DATE="${FINAL_END_DATE:-2022-12-31}"
@@ -74,6 +75,7 @@ echo "RUN_ID_PREFIX=${RUN_ID_PREFIX}"
 echo "YEAR SHARDS: ${START_YEAR}..${END_YEAR_INCLUSIVE} => s00..s$(printf '%02d' "$LAST_SHARD")"
 echo "FINAL_END_DATE=${FINAL_END_DATE}"
 echo "MAX_PARALLEL=${MAX_PARALLEL}"
+echo "TAROT_LOSS_CHANNEL_GROUP=${TAROT_LOSS_CHANNEL_GROUP}"
 
 run_one_shard() {
   local shard_idx="$1"
@@ -94,24 +96,28 @@ run_one_shard() {
   run_id="${RUN_ID_PREFIX}_${suffix}"
 
   echo "Launching shard ${suffix}: ${start_date} -> ${end_date}"
-  srun --exclusive --exact -N1 -n1 --gres=gpu:1 --cpus-per-task="$SLURM_CPUS_PER_TASK" \
-    uv run --offline --no-sync inference \
-      --from-run-id="$FROM_RUN_ID" \
-      --run-id="$run_id" \
-      --start-date="$start_date" \
-      --end-date="$end_date" \
-      --streams-output "$STREAM" \
-      --options \
-        sampling_rate_target=1.0 \
-        shuffle=False \
-        with_fsdp=False \
-        validate_with_ema=False \
-        tarot_export_features=True \
-        tarot_export_features_only=True \
-        tarot_feature_mode=gradient \
-        tarot_grad_proj_dim=2048 \
-        tarot_grad_proj_seed=0 \
-    2>&1 | sed "s/^/[${suffix}] /" &
+  cmd=(
+    uv run --offline --no-sync inference
+      --from-run-id="$FROM_RUN_ID"
+      --run-id="$run_id"
+      --start-date="$start_date"
+      --end-date="$end_date"
+      --streams-output "$STREAM"
+      --options
+        sampling_rate_target=1.0
+        shuffle=False
+        with_fsdp=False
+        validate_with_ema=False
+        tarot_export_features=True
+        tarot_export_features_only=True
+        tarot_feature_mode=gradient
+        tarot_grad_proj_dim=2048
+        tarot_grad_proj_seed=0
+  )
+  if [ -n "$TAROT_LOSS_CHANNEL_GROUP" ]; then
+    cmd+=(tarot_loss_channel_group="$TAROT_LOSS_CHANNEL_GROUP")
+  fi
+  srun --exclusive --exact -N1 -n1 --gres=gpu:1 --cpus-per-task="$SLURM_CPUS_PER_TASK"     "${cmd[@]}" 2>&1 | sed "s/^/[${suffix}] /" &
 }
 
 status=0

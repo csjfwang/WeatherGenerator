@@ -144,6 +144,15 @@ tarot_grad_proj_dim: 512
 tarot_grad_wrt: ""
 # Random seed for the JL projection matrix.
 tarot_grad_proj_seed: 0
+# Optional validation-loss channel grouping for TAROT gradient attribution.
+# Empty means use all validation target channels.
+# Supported presets:
+#   "dynamic"       -> 10u, 10v, msl, u_*, v_*, z_*
+#   "thermodynamic" -> 2d, 2t, q_*, t_*
+tarot_loss_channel_group: ""
+# Optional regex patterns overriding tarot_loss_channel_group.
+# Example: ["^10u$", "^10v$", "^u_", "^v_", "^z_"]
+tarot_loss_channel_patterns: []
 # Optional global index origin for TAROT exports and downstream selection.
 # When set, feature export writes `idx_global` in addition to `idx_time_ns`.
 # Example: "1979-01-01"

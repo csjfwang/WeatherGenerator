@@ -11,6 +11,7 @@
 # nor does it submit to any jurisdiction.
 
 import logging
+import re
 from collections import defaultdict
 
 import numpy as np
@@ -22,6 +23,12 @@ from weathergen.train.loss_modules.loss_module_base import LossModuleBase, LossV
 from weathergen.train.utils import TRAIN, VAL, Stage
 
 _logger = logging.getLogger(__name__)
+
+
+TAROT_LOSS_GROUP_PATTERNS = {
+    "dynamic": [r"^10u$", r"^10v$", r"^msl$", r"^u_", r"^v_", r"^z_"],
+    "thermodynamic": [r"^2d$", r"^2t$", r"^q_", r"^t_"],
+}
 
 
 def get_num_samples(config) -> np.typing.NDArray:
@@ -66,6 +73,63 @@ class LossPhysical(LossModuleBase):
             ]
             for name, params in loss_fcts.items()
         ]
+        self._tarot_channel_selection_cache: dict[tuple[str, tuple[str, ...]], tuple[np.ndarray, list[str]] | None] = {}
+
+    def _get_tarot_channel_patterns(self) -> list[str]:
+        if not (
+            self.stage == VAL
+            and bool(self.cf.get("tarot_export_features", False))
+            and str(self.cf.get("tarot_feature_mode", "latent")).lower() == "gradient"
+        ):
+            return []
+
+        explicit_patterns = [str(p).strip() for p in self.cf.get("tarot_loss_channel_patterns", []) if str(p).strip()]
+        if explicit_patterns:
+            return explicit_patterns
+
+        group_name = str(self.cf.get("tarot_loss_channel_group", "")).strip().lower()
+        if not group_name:
+            return []
+        if group_name not in TAROT_LOSS_GROUP_PATTERNS:
+            valid = ", ".join(sorted(TAROT_LOSS_GROUP_PATTERNS))
+            raise ValueError(
+                f"Unsupported tarot_loss_channel_group='{group_name}'. Supported values: {valid}."
+            )
+        return TAROT_LOSS_GROUP_PATTERNS[group_name]
+
+    def _select_tarot_validation_channels(
+        self, stream_name: str, target_channels: list[str]
+    ) -> tuple[np.ndarray, list[str]] | None:
+        cache_key = (stream_name, tuple(target_channels))
+        if cache_key in self._tarot_channel_selection_cache:
+            return self._tarot_channel_selection_cache[cache_key]
+
+        patterns = self._get_tarot_channel_patterns()
+        if not patterns:
+            self._tarot_channel_selection_cache[cache_key] = None
+            return None
+
+        regexes = [re.compile(pattern) for pattern in patterns]
+        selected_idx = np.array(
+            [i for i, channel in enumerate(target_channels) if any(regex.search(channel) for regex in regexes)],
+            dtype=np.int64,
+        )
+        if selected_idx.size == 0:
+            available = ", ".join(target_channels)
+            raise ValueError(
+                f"No target channels matched TAROT channel selection for stream '{stream_name}'. "
+                f"Patterns={patterns}. Available channels: [{available}]"
+            )
+
+        selected_channels = [target_channels[int(i)] for i in selected_idx.tolist()]
+        _logger.info(
+            "TAROT validation loss channel selection for stream %s: %s",
+            stream_name,
+            selected_channels,
+        )
+        result = (selected_idx, selected_channels)
+        self._tarot_channel_selection_cache[cache_key] = result
+        return result
 
     def _get_weights(self, stream_info):
         """
@@ -276,6 +340,9 @@ class LossPhysical(LossModuleBase):
 
                         target = targets_batch[target_idx]
                         target_times = targets_times_batch[target_idx]
+                        pred_for_loss = pred
+                        weights_channels_for_loss = weights_channels
+                        selected_target_channels = target_channels
 
                         # spoofed inputs are masked in the output calculations
                         sw = 0.0 if targets_is_spoof[target_idx] else 1.0
@@ -291,6 +358,18 @@ class LossPhysical(LossModuleBase):
                         pred = pred.reshape([pred.shape[0], *target.shape])
                         assert pred.shape[1] > 0
 
+                        tarot_channel_selection = self._select_tarot_validation_channels(
+                            stream_name, target_channels
+                        )
+                        if tarot_channel_selection is not None:
+                            selected_idx, selected_target_channels = tarot_channel_selection
+                            target = target[:, selected_idx]
+                            pred_for_loss = pred[..., selected_idx]
+                            if weights_channels is not None:
+                                weights_channels_for_loss = weights_channels[selected_idx]
+                        else:
+                            pred_for_loss = pred
+
                         # get masks for sub-time steps
                         substep_masks = self._get_substep_masks(
                             stream_info, timestep_idx, target_times
@@ -304,13 +383,13 @@ class LossPhysical(LossModuleBase):
                         loss_lfct, loss_lfct_chs = self._loss_per_loss_function(
                             loss_fct,
                             target,
-                            pred,
+                            pred_for_loss,
                             substep_masks,
-                            weights_channels,
+                            weights_channels_for_loss,
                             weights_locations,
                         )
 
-                        for ch_n, v in zip(target_channels, loss_lfct_chs, strict=True):
+                        for ch_n, v in zip(selected_target_channels, loss_lfct_chs, strict=True):
                             losses_all[stream_name][str(timestep_idx)][loss_fct_name][ch_n] = (
                                 spoof_weight * v if v != 0.0 else torch.nan
                             )
