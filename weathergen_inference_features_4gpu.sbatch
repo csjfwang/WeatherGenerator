@@ -61,15 +61,45 @@ FROM_RUN_ID="${FROM_RUN_ID:-l6rog843}"
 RUN_ID_PREFIX="${RUN_ID_PREFIX:-tarot_feat_tgt_grad_${FROM_RUN_ID}}"
 STREAM="${STREAM:-ERA5}"
 TAROT_LOSS_CHANNEL_GROUP="${TAROT_LOSS_CHANNEL_GROUP:-}"
+TARGET_START_DATE="${TARGET_START_DATE:-2023-01-01}"
+TARGET_END_DATE="${TARGET_END_DATE:-2024-01-01}"
 
-# Split the TAROT target interval [2023-01-01, 2024-01-01) into four sub-intervals.
+# Split the TAROT target interval into four quarterly sub-intervals.
 suffixes=(s00 s01 s02 s03)
-starts=(2023-01-01 2023-04-01 2023-07-01 2023-10-01)
-ends=(2023-04-01 2023-07-01 2023-10-01 2024-01-01)
+readarray -t quarter_bounds < <(
+  python3 - <<'PY2'
+from datetime import date
+import os
+
+start = date.fromisoformat(os.environ["TARGET_START_DATE"])
+end = date.fromisoformat(os.environ["TARGET_END_DATE"])
+
+bounds = [start]
+cur = start
+for _ in range(4):
+    month = cur.month + 3
+    year = cur.year + (month - 1) // 12
+    month = (month - 1) % 12 + 1
+    cur = date(year, month, 1)
+    bounds.append(cur)
+
+if bounds[-1] != end:
+    raise SystemExit(
+        f"TARGET_START_DATE={start.isoformat()} and TARGET_END_DATE={end.isoformat()} must span exactly four quarterly sub-intervals. Expected end={bounds[-1].isoformat()}."
+    )
+
+for bound in bounds:
+    print(bound.isoformat())
+PY2
+)
+starts=("${quarter_bounds[0]}" "${quarter_bounds[1]}" "${quarter_bounds[2]}" "${quarter_bounds[3]}")
+ends=("${quarter_bounds[1]}" "${quarter_bounds[2]}" "${quarter_bounds[3]}" "${quarter_bounds[4]}")
 
 shard_indices=(0 1 2 3)
 
 echo "Will run shard indices: ${shard_indices[*]}"
+echo "TARGET_START_DATE=${TARGET_START_DATE}"
+echo "TARGET_END_DATE=${TARGET_END_DATE}"
 echo "TAROT_LOSS_CHANNEL_GROUP=${TAROT_LOSS_CHANNEL_GROUP}"
 
 
