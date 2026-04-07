@@ -73,7 +73,19 @@ export LD_LIBRARY_PATH="$TORCH_LIB:$LD_LIBRARY_PATH"
 export UV_CACHE_DIR=/p/project1/weatherai/uv_cache_shared
 
 # srun uv run --offline --no-sync train_continue --from_run_id r93m2nvw
-srun uv run --offline --no-sync train_continue --from_run_id full2full --reuse_run_id 
+# srun uv run --offline --no-sync train_continue \
+#   --from-run-id l6rog843 \
+#   --mini-epoch -1 \
+#   --run-id l6rog843_ft_tarot_2022Q4_2023Q3 \
+#   --config config/config_forecasting_finetuning.yml config/tarot_2022Q4_2023Q3_l6rog843.yml 
+
+srun uv run --offline --no-sync train_continue \
+  --from-run-id epiys5z8 \
+  --mini-epoch -1 \
+  --run-id epiys5z8_ft_tarot_2022Q4_2023Q3 \
+  --config config/config_forecasting_finetuning.yml config/tarot_2022Q4_2023Q3_epiys5z8.yml 
+  # --options istep=0 data_loader_rng_seed=42
+
 
 # srun uv --offline run train
 

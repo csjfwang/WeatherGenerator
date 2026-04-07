@@ -10,7 +10,10 @@ import numpy as np
 import pandas as pd
 from omegaconf import OmegaConf
 
-from weathergen.datasets.data_reader_base import str_to_datetime64
+
+
+def _str_to_datetime64(value: str) -> np.datetime64:
+    return np.datetime64(str(value))
 
 
 def _parse_args() -> argparse.Namespace:
@@ -29,6 +32,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--random", default=None, help="Path to random selected indices (.npy/.npz).")
     parser.add_argument(
         "--stratified", default=None, help="Path to stratified selected indices (.npy/.npz)."
+    )
+    parser.add_argument(
+        "--selection",
+        action="append",
+        default=[],
+        metavar="LABEL=PATH",
+        help=(
+            "Additional selection to compare, provided as LABEL=PATH. "
+            "Can be passed multiple times for 2-way, 3-way, or larger comparisons."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -84,6 +97,28 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _parse_selection_specs(selection_specs: list[str]) -> dict[str, str]:
+    selections: dict[str, str] = {}
+    for spec in selection_specs:
+        if "=" not in spec:
+            raise ValueError(
+                f"Invalid --selection value '{spec}'. Expected LABEL=PATH."
+            )
+        label, raw_path = spec.split("=", 1)
+        label = label.strip()
+        raw_path = raw_path.strip()
+        if not label or not raw_path:
+            raise ValueError(
+                f"Invalid --selection value '{spec}'. Expected LABEL=PATH with non-empty label and path."
+            )
+        if label == "full":
+            raise ValueError("Label 'full' is reserved and cannot be passed via --selection.")
+        if label in selections:
+            raise ValueError(f"Duplicate selection label '{label}' passed to --selection.")
+        selections[label] = raw_path
+    return selections
+
+
 def _load_indices(path: str | None) -> np.ndarray | None:
     if path is None:
         return None
@@ -122,13 +157,26 @@ def _get_time_grid(cfg_path: str) -> tuple[pd.Timestamp, pd.Timestamp, int, np.n
     cfg = OmegaConf.load(cfg_path)
     training_cfg = cfg.get("training_config", cfg)
     validation_cfg = cfg.get("validation_config", cfg)
-    start = str_to_datetime64(training_cfg.start_date)
-    end = str_to_datetime64(training_cfg.end_date)
+    start = _str_to_datetime64(training_cfg.start_date)
+    end = _str_to_datetime64(training_cfg.end_date)
     if validation_cfg.get("start_date", None) is None:
         raise ValueError("Config must provide validation_config.start_date for anchor year inference.")
-    val_start = str_to_datetime64(validation_cfg.start_date)
+    val_start = _str_to_datetime64(validation_cfg.start_date)
     val_anchor_year = pd.Timestamp(str(val_start)).year
-    step_hours = int(cfg.step_hrs)
+
+    if cfg.get("step_hrs", None) is not None:
+        step_hours = int(cfg.step_hrs)
+    elif cfg.get("tarot_global_index_step_hours", None) is not None:
+        step_hours = int(cfg.tarot_global_index_step_hours)
+    elif training_cfg.get("time_window_step", None) is not None:
+        step_delta = pd.to_timedelta(str(training_cfg.time_window_step))
+        step_hours = int(step_delta / pd.Timedelta(hours=1))
+    else:
+        raise ValueError(
+            "Could not determine step size from config. Expected one of: step_hrs, "
+            "tarot_global_index_step_hours, or training_config.time_window_step."
+        )
+
     total_steps = int((end - start) // np.timedelta64(step_hours, "h"))
     full_idx = np.arange(total_steps, dtype=np.int64)
     start_ts = pd.Timestamp(str(start))
@@ -534,15 +582,25 @@ def main() -> None:
     total_steps = int(full_idx.size)
 
     method_indices: dict[str, np.ndarray] = {"full": full_idx}
-    tarot_idx = _load_indices(args.tarot)
-    random_idx = _load_indices(args.random)
-    stratified_idx = _load_indices(args.stratified)
-    if tarot_idx is not None:
-        method_indices["tarot"] = tarot_idx
-    if random_idx is not None:
-        method_indices["random"] = random_idx
-    if stratified_idx is not None:
-        method_indices["stratified"] = stratified_idx
+
+    legacy_inputs = {
+        "tarot": args.tarot,
+        "random": args.random,
+        "stratified": args.stratified,
+    }
+    explicit_inputs = _parse_selection_specs(args.selection)
+    for label in legacy_inputs:
+        if legacy_inputs[label] is not None and label in explicit_inputs:
+            raise ValueError(
+                f"Selection label '{label}' was provided both via legacy flag and --selection."
+            )
+
+    selection_inputs = {
+        **{label: path for label, path in legacy_inputs.items() if path is not None},
+        **explicit_inputs,
+    }
+    for label, sel_path in selection_inputs.items():
+        method_indices[label] = _load_indices(sel_path)
 
     for name, idx in method_indices.items():
         _validate_index_range(name, idx, total_steps)
