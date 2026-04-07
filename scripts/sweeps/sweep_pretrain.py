@@ -229,6 +229,11 @@ def _parse_args() -> Tuple[argparse.Namespace, List[str]]:
         help="Number of nodes passed to the launcher. Default: 1",
     )
     parser.add_argument(
+        "--account",
+        default=None,
+        help="SLURM account passed to the launcher (e.g. haicore-project1).",
+    )
+    parser.add_argument(
         "--stage1-jobs",
         type=int,
         default=1,
@@ -679,6 +684,8 @@ def main() -> int:
                 "--config", overlay_arg,
                 "--nodes", str(args.nodes),
             ]
+        if args.account is not None:
+            command.extend(["--account", args.account])
         command.extend(launcher_args)
 
         # log experiment details
