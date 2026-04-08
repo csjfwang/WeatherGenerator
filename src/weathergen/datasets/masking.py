@@ -397,7 +397,8 @@ class Masker:
         source_cfgs = stream_masking_cfg.get("model_input", [])
 
         # target and source are assumed identical when target is not specified
-        if len(target_cfgs) == 0:
+        target_auto_generated = len(target_cfgs) == 0
+        if target_auto_generated:
             target_cfgs = copy.deepcopy(source_cfgs)
 
         losses = stream_masking_cfg.losses
@@ -461,7 +462,11 @@ class Masker:
                 relationship, losses = rel_losses
                 # ensure proper default relationships
                 if relationship is None:
-                    if source_cfg.get("masking_strategy") == "random":
+                    if target_auto_generated:
+                        # source rate drives the split: generate source independently,
+                        # then set target = complement of source (done below)
+                        relationship = "independent"
+                    elif source_cfg.get("masking_strategy") == "random":
                         # default for masked token modeling
                         relationship = "complement"
                     else:
@@ -482,6 +487,16 @@ class Masker:
                         masking_strategy_config=masking_config,
                         target_relationship_mask=(relationship, target_masks.get_mask(target_idx)),
                     )
+
+                # When target was auto-generated from source config, rate controls the source
+                # fraction directly. Override the target mask to be the complement of the source
+                # so the decoder reconstructs exactly what the encoder did not see.
+                if target_auto_generated and not (
+                    is_stream_diagnostic(stream_info, self.stage) or is_stream_dropped
+                ):
+                    complement = ~source_mask
+                    target_masks.masks[target_idx] = complement
+                    target_masks.metadata[target_idx].mask = complement
 
                 corr = target_idx
                 source_masks.add_mask(
