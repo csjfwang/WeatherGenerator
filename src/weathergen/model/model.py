@@ -32,6 +32,7 @@ from weathergen.model.engines import (
     LatentPredictionHeadMLP,
     LatentPredictionHeadTransformer,
     LatentState,
+    MAEDecoderEngine,
     TargetPredictionEngine,
     TargetPredictionEngineClassic,
 )
@@ -158,24 +159,7 @@ class ModelParams(torch.nn.Module):
         return self
 
     def reset_parameters(self, cf: Config) -> "ModelParams":
-        """Creates positional embedding for each grid point for each stream used after stream
-        embedding, positional embedding for all stream assimilated cell-level local embedding,
-        initializing queries for local-to-global adapters, HEALPix neighbourhood based parameter
-        initializing for target prediction.
-
-        Sinusoidal positional encoding: Harmonic positional encoding based upon sine and cosine for
-            both per stream after stream embedding and per cell level for local assimilation.
-
-        HEALPix neighbourhood structure: Determine the neighbors for each cell and initialize each
-            with its own cell number as well as the cell numbers of its neighbors. If a cell has
-            fewer than eight neighbors, use its own cell number to fill the remaining slots.
-
-        Query len based parameter creation: Calculate parameters for the calculated token length at
-            each cell after local assimilation.
-
-        Args:
-            cf : Configuration
-        """
+        """Reset positional and neighbourhood parameters."""
 
         # positional encodings
 
@@ -193,11 +177,10 @@ class ModelParams(torch.nn.Module):
         dim_embed = cf.ae_global_dim_embed
 
         if self.rope_2D:
-            # Precompute per-cell center coordinates (lat, lon in radians) for 2D RoPE.
-            # Shape: (num_healpix_cells, ae_local_num_queries, 2)
+            # precompute per-cell center coordinates for 2D RoPE
             verts, _ = healpix_verts_rots(self.healpix_level, 0.5, 0.5)
             coords = r3tos2(verts.to(self.rope_coords.device)).to(self.rope_coords.dtype)
-            # Per-cell coords for QueryAggregationEngine (no query expansion)
+            # per-cell coords for query aggregation
             self.rope_cell_coords.data.copy_(coords)
             coords = coords.unsqueeze(1).repeat(1, cf.ae_local_num_queries, 1)
             coords_flat = coords.flatten(0, 1).unsqueeze(0)
@@ -205,10 +188,7 @@ class ModelParams(torch.nn.Module):
             self.rope_coords.data.fill_(0.0)
             self.rope_coords.data[:, offset : offset + coords_flat.shape[1], :].copy_(coords_flat)
 
-        # pe_global: always initialized. RoPE handles relative position in Q/K, but pe_global
-        # provides per-cell token identity which is critical for masked cells that have no
-        # content from local assimilation. Without it, masked cells are identical and the
-        # teacher representation (evaluated without dropout) collapses to low rank.
+        # always initialize pe_global
         self.pe_global.data.fill_(0.0)
         xs = 2.0 * np.pi * torch.arange(0, dim_embed, 2, device=self.pe_global.device) / dim_embed
         self.pe_global.data[..., 0::2] = 0.5 * torch.sin(
@@ -317,6 +297,7 @@ class Model(torch.nn.Module):
         self.embed_target_coords = None
         self.encoder: EncoderModule | None = None
         self.forecast_engine: ForecastingEngine | None = None
+        self.mae_decoder: MAEDecoderEngine | None = None
         self.pred_heads = None
         self.q_cells: torch.Tensor | None = None
         self.stream_names: list[str] = None
@@ -373,6 +354,11 @@ class Model(torch.nn.Module):
         self.forecast_engine = None
         if cf.fe_num_blocks > 0:
             self.forecast_engine = ForecastingEngine(cf, mode_cfg, self.num_healpix_cells)
+
+        # MAE decoder
+        self.mae_decoder = None
+        if cf.get("strict_mae_encoder", False) and cf.get("mae_decoder_num_blocks", 0) > 0:
+            self.mae_decoder = MAEDecoderEngine(cf)
 
         # embed coordinates yielding one query token for each target token
         dropout_rate = cf.embed_dropout_rate
@@ -676,26 +662,101 @@ class Model(torch.nn.Module):
             z_pre_norm=tokens,
         )
 
-    def forward(self, model_params: ModelParams, batch: ModelBatch) -> ModelOutput:
-        """Forward pass of the model
+    def _mae_assemble_full_grid(
+        self,
+        model_params: ModelParams,
+        tokens_vis: torch.Tensor,
+        batch_vis_lens: torch.Tensor,
+        cell_mask: torch.Tensor,
+        rs: int,
+    ) -> torch.Tensor:
+        """Assemble full-grid tokens from strict-MAE encoder output."""
+        assert self.mae_decoder is not None, (
+            "_mae_assemble_full_grid requires a MAEDecoderEngine.  "
+            "Set mae_decoder_num_blocks > 0 when strict_mae_encoder is True."
+        )
+        assert self.cf.ae_local_num_queries == 1, (
+            "strict_mae_encoder currently requires ae_local_num_queries == 1"
+        )
 
-        Tokens are processed through the model components, which were defined in the create method.
-        Args:
-            model_params : Query and embedding parameters
-            batch
-        Returns:
-            A list containing all prediction results
-        """
+        num_extra = self.num_aux_tokens  # register + class tokens
+        num_cells = self.num_healpix_cells
+        dim = self.cf.ae_global_dim_embed
+        device = tokens_vis.device
+        dtype = tokens_vis.dtype
+
+        cell_mask_2d = cell_mask.flatten(0, 1)
+        cell_mask_inv = ~cell_mask_2d
+
+        # masked-cell position queries
+        q_cells_exp = self.encoder.q_cells.expand(num_cells, -1, -1).squeeze(1)
+        pe_global_sq = model_params.pe_global.squeeze(1)
+        cell_queries_all = q_cells_exp + pe_global_sq
+
+        # pack masked queries and build lens
+        masked_queries_list = [cell_queries_all[cell_mask_inv[i]] for i in range(rs)]
+        masked_queries = torch.cat(masked_queries_list, dim=0)
+        zero = torch.zeros(1, device=device, dtype=torch.int32)
+        masked_counts = cell_mask_inv.sum(dim=1).to(torch.int32)
+        mask_lens = torch.cat([zero, masked_counts])
+
+        masked_latents = self.mae_decoder(
+            visible=tokens_vis,
+            masked=masked_queries.to(dtype),
+            vis_lens=batch_vis_lens,
+            mask_lens=mask_lens,
+        ).to(dtype)
+
+        full_cells = torch.zeros(rs, num_cells, dim, device=device, dtype=dtype)
+        vis_cum = batch_vis_lens.cumsum(0)
+        mask_cum = mask_lens.cumsum(0)
+
+        extra_tokens_list = []
+        for i in range(rs):
+            vs, ve = vis_cum[i].item(), vis_cum[i + 1].item()
+            ms, me = mask_cum[i].item(), mask_cum[i + 1].item()
+
+            extra_tokens_list.append(tokens_vis[vs : vs + num_extra])
+
+            vis_patch = tokens_vis[vs + num_extra : ve]
+            full_cells[i, cell_mask_2d[i]] = vis_patch
+
+            masked_patch = masked_latents[ms:me]
+            full_cells[i, cell_mask_inv[i]] = masked_patch
+
+        extra_tokens = torch.stack(extra_tokens_list, dim=0)
+        tokens_full = torch.cat([extra_tokens, full_cells], dim=1)
+        return tokens_full
+
+    def forward(self, model_params: ModelParams, batch: ModelBatch) -> ModelOutput:
+        """Forward pass."""
 
         output = ModelOutput(batch.get_output_len())
+        strict_mae = self.cf.get("strict_mae_encoder", False)
 
-        tokens, posteriors = self.encoder(model_params, batch)
-        output.add_latent_prediction(0, "posteriors", posteriors)
+        if strict_mae:
+            # strict-MAE path
+            assert batch.get_num_steps() == 1, (
+                "strict_mae_encoder requires num_steps_input == 1"
+            )
+            tokens_vis, posteriors, batch_vis_lens, cell_mask = self.encoder(
+                model_params, batch, strict_mae=True
+            )
+            output.add_latent_prediction(0, "posteriors", posteriors)
 
-        # recover batch dimension and separate input_steps
-        shape = (len(batch), batch.get_num_steps(), *tokens.shape[1:])
-        # collapse along input step dimension
-        tokens = tokens.reshape(shape).sum(axis=1)
+            rs = len(batch)  # num_steps == 1
+            tokens = self._mae_assemble_full_grid(
+                model_params, tokens_vis, batch_vis_lens, cell_mask, rs
+            )
+        else:
+            # legacy / finetune path
+            tokens, posteriors = self.encoder(model_params, batch)
+            output.add_latent_prediction(0, "posteriors", posteriors)
+
+            # recover batch dimension and separate input_steps
+            shape = (len(batch), batch.get_num_steps(), *tokens.shape[1:])
+            # collapse along input step dimension
+            tokens = tokens.reshape(shape).sum(axis=1)
 
         # roll-out in latent space, iterate and generate output over requested output steps
         for step in batch.get_output_idxs():

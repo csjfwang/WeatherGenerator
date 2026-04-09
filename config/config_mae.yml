@@ -6,12 +6,6 @@
 # In applying this licence, ECMWF does not waive the privileges and immunities
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
-#
-# Masked Autoencoder (MAE) config.
-# - Model size matches config_jepa.yml
-# - Physical loss only (no student-teacher)
-# - Pure reconstruction: no forecasting steps
-# - All masking strategies documented below; only "random" is active by default
 
 embed_orientation: "channels"
 embed_unembed_mode: "block"
@@ -61,7 +55,7 @@ num_register_tokens: 7
 
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder
-fe_num_blocks: 16
+fe_num_blocks: 0  # no forecast engine for MAE pretraining
 fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
@@ -72,7 +66,7 @@ forecast_att_dense_rate: 1.0
 with_step_conditioning: True
 
 healpix_level: 5
-# Use 2D RoPE instead of traditional global positional encoding
+# use 2D RoPE instead of global positional encoding
 rope_2D: False
 
 with_mixed_precision: True
@@ -90,6 +84,14 @@ latent_noise_gamma: 2.0
 latent_noise_saturate_encodings: 5
 latent_noise_use_additive_noise: False
 latent_noise_deterministic_latents: True
+
+# strict-MAE encoder
+strict_mae_encoder: True
+
+# MAE decoder
+mae_decoder_num_blocks: 4
+mae_decoder_dim_embed: 512
+mae_decoder_num_heads: 16
 
 freeze_modules: ""
 
@@ -146,7 +148,7 @@ training_config:
   time_window_step: 06:00:00
   time_window_len: 06:00:00
 
-  # Pure reconstruction: no offset, no forecast steps
+  # reconstruction only
   window_offset_prediction: 0
 
   learning_rate_scheduling:
@@ -178,90 +180,7 @@ training_config:
         },
     }
 
-  # ---------------------------------------------------------------------------
-  # Masking strategies for MAE reconstruction.
-  # Only one strategy should be active at a time in model_input.
-  # All strategies are documented below with their full parameter sets.
-  # ---------------------------------------------------------------------------
-  #
-  # [1] RANDOM — independently mask each cell with a fixed keep rate
-  #     masking_strategy: "random"
-  #     masking_strategy_config:
-  #       rate: 0.6           # fraction of cells to keep (0.0–1.0)
-  #       rate_sampling: False  # if True, sample keep-rate from a normal distribution each batch
-  #       diffusion_rn: False   # if True, sample a noise level param (for diffusion models)
-  #
-  # [2] HEALPIX — mask entire HEALPix parent cells at a coarser level
-  #     masking_strategy: "healpix"
-  #     masking_strategy_config:
-  #       rate: 0.3           # fraction of parent cells to keep
-  #       hl_mask: 3          # HEALPix level to mask at (must be <= healpix_level)
-  #       rate_sampling: False
-  #
-  # [3] CROPPING (HEALPIX) — keep one spatially contiguous region, mask the rest
-  #     masking_strategy: "cropping_healpix"
-  #     masking_strategy_config:
-  #       rate: 0.4           # fraction of cells inside the kept region
-  #       hl_mask: 0          # HEALPix level for region selection
-  #       method: "geodesic_disk"  # "disk" | "random_walk" | "geodesic_disk"
-  #       rate_sampling: False
-  #
-  # [4] SATELLITE SWATH — simulate polar-orbit satellite ground tracks
-  #     masking_strategy: "satellite_swath"
-  #     masking_strategy_config:
-  #       num_swaths: 5         # number of orbital passes
-  #       swath_width_deg: 20.0 # swath width in great-circle degrees at equator
-  #       orbit_drift_deg: -25.0  # longitude drift S-pole → N-pole (negative = westward)
-  #
-  # [5] SATELLITE SWATH SPARSE — swath mask + random subsampling within the swath
-  #     masking_strategy: "satellite_swath_sparse"
-  #     masking_strategy_config:
-  #       num_swaths: 12        # more passes → denser coverage
-  #       swath_width_deg: 10.0
-  #       orbit_drift_deg: -25.0
-  #       rate: 0.6             # fraction of in-swath cells to keep
-  #       rate_sampling: False
-  #
-  # [6] MIXED — randomly select one sub-strategy per sample (weighted)
-  #     masking_strategy: "mixed"
-  #     masking_strategy_config:
-  #       strategies:
-  #         - "random"
-  #         - "healpix"
-  #         - "cropping_healpix"
-  #         - "satellite_swath"
-  #         - "satellite_swath_sparse"
-  #       strategy_weights:          # optional; uniform if omitted
-  #         random: 1.0
-  #         healpix: 1.0
-  #         cropping_healpix: 1.0
-  #         satellite_swath: 1.0
-  #         satellite_swath_sparse: 1.0
-  #       strategy_configs:          # optional per-strategy overrides
-  #         random:
-  #           rate: 0.6
-  #         healpix:
-  #           rate: 0.3
-  #           hl_mask: 3
-  #         cropping_healpix:
-  #           rate: 0.4
-  #           hl_mask: 0
-  #           method: "geodesic_disk"
-  #         satellite_swath:
-  #           num_swaths: 5
-  #           swath_width_deg: 20.0
-  #         satellite_swath_sparse:
-  #           num_swaths: 12
-  #           swath_width_deg: 10.0
-  #           rate: 0.6
-  #       hl_mask_levels: [0, 1, 2, 3]  # HEALPix levels to randomly sample for healpix-family strategies
-  # ---------------------------------------------------------------------------
-
-  # ---------------------------------------------------------------------------
-  # Active masking strategy — uncomment exactly ONE model_input block below.
-  # ---------------------------------------------------------------------------
-
-  # [1] RANDOM (DEFAULT)
+  # masking strategies
   model_input: {
     "mae_random": {
       masking_strategy: "random",

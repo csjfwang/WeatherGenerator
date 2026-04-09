@@ -36,12 +36,7 @@ class EmbeddingEngine(torch.nn.Module):
     name: "EmbeddingEngine"
 
     def __init__(self, cf: Config, sources_size) -> None:
-        """
-        Initialize the EmbeddingEngine with the configuration.
-
-        :param cf: Configuration object containing parameters for the engine.
-        :param sources_size: List of source sizes for each stream.
-        """
+        """Embedding engine."""
         super(EmbeddingEngine, self).__init__()
         self.cf = cf
         self.dtype = get_dtype(self.cf.mixed_precision_dtype)
@@ -129,11 +124,7 @@ class LocalAssimilationEngine(torch.nn.Module):
     name: "LocalAssimilationEngine"
 
     def __init__(self, cf: Config) -> None:
-        """
-        Initialize the LocalAssimilationEngine with the configuration.
-
-        :param cf: Configuration object containing parameters for the engine.
-        """
+        """Local assimilation engine."""
         super(LocalAssimilationEngine, self).__init__()
         self.cf = cf
         self.ae_local_blocks = torch.nn.ModuleList()
@@ -172,11 +163,7 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
     name: "Local2GlobalAssimilationEngine"
 
     def __init__(self, cf: Config) -> None:
-        """
-        Initialize the Local2GlobalAssimilationEngine with the configuration.
-
-        :param cf: Configuration object containing parameters for the engine.
-        """
+        """Local-to-global assimilation engine."""
         super(Local2GlobalAssimilationEngine, self).__init__()
         self.cf = cf
         self.ae_adapter = torch.nn.ModuleList()
@@ -242,15 +229,7 @@ class QueryAggregationEngine(torch.nn.Module):
     name: "QueryAggregationEngine"
 
     def __init__(self, cf: Config, num_healpix_cells: int) -> None:
-        """
-        Initialize the QueryAggregationEngine with the configuration.
-
-        This engine is used for aggregating information from all query tokens coming
-        from healpix cells, that are not masked.
-
-        :param cf: Configuration object containing parameters for the engine.
-        :param num_healpix_cells: Number of healpix cells used for local queries.
-        """
+        """Query aggregation engine."""
         super(QueryAggregationEngine, self).__init__()
         self.cf = cf
         self.num_healpix_cells = num_healpix_cells
@@ -259,9 +238,7 @@ class QueryAggregationEngine(torch.nn.Module):
 
         global_rate = int(1 / self.cf.ae_aggregation_att_dense_rate)
         for i in range(self.cf.ae_aggregation_num_blocks):
-            ## Alternate between local and global attention
-            #  as controlled by cf.ae_dense_local_att_dense_rate
-            # Last block is always global attention
+            # alternate between local and global attention
             if i % global_rate == 0 or i + 1 == self.cf.ae_aggregation_num_blocks:
                 self.ae_aggregation_blocks.append(
                     MultiSelfAttentionHeadVarlen(
@@ -319,12 +296,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
     name: "GlobalAssimilationEngine"
 
     def __init__(self, cf: Config, num_healpix_cells: int) -> None:
-        """
-        Initialize the GlobalAssimilationEngine with the configuration.
-
-        :param cf: Configuration object containing parameters for the engine.
-        :param num_healpix_cells: Number of healpix cells used for local queries.
-        """
+        """Global assimilation engine."""
         super(GlobalAssimilationEngine, self).__init__()
         self.cf = cf
         self.num_healpix_cells = num_healpix_cells
@@ -333,12 +305,11 @@ class GlobalAssimilationEngine(torch.nn.Module):
 
         global_rate = int(1 / self.cf.ae_global_att_dense_rate)
         for i in range(self.cf.ae_global_num_blocks):
-            ## Alternate between local and global attention
-            #  as controlled by cf.ae_global_att_dense_rate
-            # Last block is always global attention
+            # alternate between local and global attention
             if i % global_rate == 0 or i + 1 == self.cf.ae_global_num_blocks:
+                # use varlen self-attention
                 self.ae_global_blocks.append(
-                    MultiSelfAttentionHead(
+                    MultiSelfAttentionHeadVarlen(
                         self.cf.ae_global_dim_embed,
                         num_heads=self.cf.ae_global_num_heads,
                         dropout_rate=self.cf.ae_global_dropout_rate,
@@ -383,10 +354,38 @@ class GlobalAssimilationEngine(torch.nn.Module):
                 torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
             )
 
-    def forward(self, tokens, coords=None):
-        aux_info = None
+    def forward(self, tokens, x_lens=None, coords=None):
+        """Global assimilation forward."""
+        is_3d = tokens.dim() == 3
+        if is_3d:
+            batch, seq, dim = tokens.shape
+            tokens = tokens.reshape(-1, dim)
+            # expand coords to match the packed sequence
+            if coords is not None:
+                coords = coords.expand(batch, seq, 2).reshape(-1, 2)
+            if x_lens is None:
+                zero = torch.zeros(1, device=tokens.device, dtype=torch.int32)
+                x_lens = torch.cat(
+                    [zero, torch.full((batch,), seq, dtype=torch.int32, device=tokens.device)]
+                )
+
         for block in self.ae_global_blocks:
-            tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
+            if isinstance(block, MultiSelfAttentionHeadVarlen):
+                tokens = checkpoint(block, tokens, x_lens, None, coords, use_reentrant=False)
+            elif isinstance(block, MultiSelfAttentionHeadLocal):
+                # local attention is not supported in the varlen path
+                raise NotImplementedError(
+                    "GlobalAssimilationEngine: ae_global_att_dense_rate < 1.0 "
+                    "(MultiSelfAttentionHeadLocal) is not supported after the varlen "
+                    "refactor.  Set ae_global_att_dense_rate: 1.0 in config."
+                )
+            else:
+                tokens = checkpoint(block, tokens, use_reentrant=False)
+
+        if is_3d:
+            # restore dense shape
+            tokens = tokens.reshape(batch, seq, -1)
+
         return tokens
 
 
@@ -824,6 +823,82 @@ class TargetPredictionEngine(nn.Module):
             else output
         )
         return output
+
+
+class MAEDecoderEngine(nn.Module):
+    """MAE decoder."""
+
+    def __init__(self, cf: Config) -> None:
+        super().__init__()
+        self.cf = cf
+        num_blocks = cf.get("mae_decoder_num_blocks", 4)
+        num_heads = cf.get("mae_decoder_num_heads", 16)
+        encoder_dim = cf.ae_global_dim_embed
+        # decoder internal dimension
+        decoder_dim = cf.get("mae_decoder_dim_embed", encoder_dim)
+
+        self.in_proj = nn.Linear(encoder_dim, decoder_dim, bias=False)
+        self.out_proj = nn.Linear(decoder_dim, encoder_dim, bias=False)
+
+        self.blocks = nn.ModuleList()
+        for _ in range(num_blocks):
+            self.blocks.append(
+                MultiCrossAttentionHeadVarlen(
+                    dim_embed_q=decoder_dim,
+                    dim_embed_kv=encoder_dim,
+                    num_heads=num_heads,
+                    dropout_rate=cf.get("ae_global_dropout_rate", 0.1),
+                    with_residual=True,
+                    with_qk_lnorm=cf.ae_global_with_qk_lnorm,
+                    with_flash=cf.with_flash_attention,
+                    norm_type=cf.norm_type,
+                    norm_eps=cf.norm_eps,
+                    attention_dtype=get_dtype(cf.attention_dtype),
+                )
+            )
+            self.blocks.append(
+                MultiSelfAttentionHeadVarlen(
+                    dim_embed=decoder_dim,
+                    num_heads=num_heads,
+                    dropout_rate=cf.get("ae_global_dropout_rate", 0.1),
+                    with_qk_lnorm=cf.ae_global_with_qk_lnorm,
+                    with_flash=cf.with_flash_attention,
+                    norm_type=cf.norm_type,
+                    norm_eps=cf.norm_eps,
+                    attention_dtype=get_dtype(cf.attention_dtype),
+                )
+            )
+            self.blocks.append(
+                MLP(
+                    decoder_dim,
+                    decoder_dim,
+                    with_residual=True,
+                    hidden_factor=cf.ae_global_mlp_hidden_factor,
+                    dropout_rate=cf.get("ae_global_dropout_rate", 0.1),
+                    norm_type=cf.norm_type,
+                    norm_eps=cf.mlp_norm_eps,
+                )
+            )
+
+    def forward(
+        self,
+        visible: torch.Tensor,
+        masked: torch.Tensor,
+        vis_lens: torch.Tensor,
+        mask_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode masked latents."""
+        tokens = self.in_proj(masked)
+        for block in self.blocks:
+            if isinstance(block, MultiCrossAttentionHeadVarlen):
+                tokens = checkpoint(
+                    block, tokens, visible, mask_lens, vis_lens, use_reentrant=False
+                )
+            elif isinstance(block, MultiSelfAttentionHeadVarlen):
+                tokens = checkpoint(block, tokens, mask_lens, use_reentrant=False)
+            else:
+                tokens = checkpoint(block, tokens, use_reentrant=False)
+        return self.out_proj(tokens)
 
 
 @dataclasses.dataclass

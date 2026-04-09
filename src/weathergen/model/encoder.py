@@ -30,13 +30,7 @@ class EncoderModule(torch.nn.Module):
     name: "EncoderModule"
 
     def __init__(self, cf: Config, sources_size, targets_num_channels, targets_coords_size) -> None:
-        """
-        Initialize the EmbeddingEngine with the configuration.
-
-        :param cf: Configuration object containing parameters for the engine.
-        :param sources_size: List of source sizes for each stream.
-        :param stream_names: Ordered list of stream identifiers aligned with cf.streams.
-        """
+        """Encoder module."""
         super(EncoderModule, self).__init__()
         self.cf = cf
 
@@ -56,7 +50,7 @@ class EncoderModule(torch.nn.Module):
         self.interpolator_latents: LatentInterpolator | None = None
 
         # embedding engine
-        # determine stream names once so downstream components use consistent keys
+        # determine stream names once
         self.stream_names = [str(stream_cfg["name"]) for stream_cfg in cf.streams]
         # separate embedding networks for differnt observation types
         self.embed_engine = EmbeddingEngine(cf, self.sources_size)
@@ -112,23 +106,47 @@ class EncoderModule(torch.nn.Module):
         # global assimilation engine
         self.ae_global_engine = GlobalAssimilationEngine(cf, self.num_healpix_cells)
 
-    def forward(self, model_params, batch):
-        """
-        Encoder forward
-        """
+    def forward(self, model_params, batch, strict_mae: bool = False):
+        """Encoder forward."""
 
         stream_cell_tokens = checkpoint(
             self.embed_engine, batch, model_params.pe_embed, use_reentrant=False
         )
 
+        if strict_mae:
+            tokens_vis, posteriors, batch_vis_lens, cell_mask, vis_rope_coords = checkpoint(
+                self.assimilate_local,
+                model_params,
+                stream_cell_tokens,
+                batch,
+                strict_mae,
+                use_reentrant=False,
+            )
+            # global engine on visible tokens only
+            tokens_vis = checkpoint(
+                self.ae_global_engine,
+                tokens_vis,
+                batch_vis_lens,
+                vis_rope_coords,
+                use_reentrant=False,
+            )
+            return tokens_vis, posteriors, batch_vis_lens, cell_mask
+
+        # legacy / finetune path
         tokens_global, posteriors = checkpoint(
-            self.assimilate_local, model_params, stream_cell_tokens, batch, use_reentrant=False
+            self.assimilate_local,
+            model_params,
+            stream_cell_tokens,
+            batch,
+            strict_mae,
+            use_reentrant=False,
         )
 
         tokens_global = checkpoint(
             self.ae_global_engine,
             tokens_global,
-            coords=model_params.rope_coords,
+            None,  # x_lens=None → auto-pack from 3D shape
+            model_params.rope_coords,
             use_reentrant=False,
         )
 
@@ -217,9 +235,7 @@ class EncoderModule(torch.nn.Module):
         tokens_lens,
         rope_cell_coords=None,
     ):
-        """
-        Aggregation engine on the global latents of unmasked cells
-        """
+        """Aggregation on unmasked cell latents."""
 
         zero_pad = torch.zeros(1, device=tokens_global_unmasked.device, dtype=torch.int32)
 
@@ -245,7 +261,7 @@ class EncoderModule(torch.nn.Module):
             dim=0,
         )
 
-        # Build packed coords matching the interleaved token order
+        # build packed coords matching the token order
         if rope_cell_coords is not None:
             num_extra = self.num_class_tokens + self.num_register_tokens
             zero_coords = torch.zeros(
@@ -265,22 +281,12 @@ class EncoderModule(torch.nn.Module):
             tokens_global_unmasked, batch_lens_patched, use_reentrant=False, coords=packed_coords
         )
 
-        return tokens_global_unmasked
+        return tokens_global_unmasked, batch_lens_patched, cell_mask, packed_coords
 
     def assimilate_local(
-        self, model_params, tokens: torch.Tensor, batch: ModelBatch
+        self, model_params, tokens: torch.Tensor, batch: ModelBatch, strict_mae: bool = False
     ) -> torch.Tensor:
-        """
-        Processes embedded tokens locally and prepares them for the global assimilation
-
-        Args:
-            model_params : Query and embedding parameters
-            tokens : Input tokens to be processed by local assimilation
-            cell_lens : Used to identify range of tokens to use from generated tokens in cell
-                embedding
-        Returns:
-            Tokens for global assimilation
-        """
+        """Local assimilation and projection to global tokens."""
 
         cell_lens = torch.sum(batch.tokens_lens, 2).flatten()
 
@@ -306,14 +312,20 @@ class EncoderModule(torch.nn.Module):
         )
 
         # apply aggregation engine on unmasked tokens
-        tokens_global_unmasked = self.aggregation_engine_unmasked(
-            tokens_global_unmasked,
-            tokens_global_register_class,
-            batch.tokens_lens,
-            rope_cell_coords=model_params.rope_cell_coords,
+        tokens_global_unmasked, batch_vis_lens, cell_mask, vis_rope_coords = (
+            self.aggregation_engine_unmasked(
+                tokens_global_unmasked,
+                tokens_global_register_class,
+                batch.tokens_lens,
+                rope_cell_coords=model_params.rope_cell_coords,
+            )
         )
 
-        # final processing
+        # strict-MAE path
+        if strict_mae:
+            return tokens_global_unmasked, posteriors, batch_vis_lens, cell_mask, vis_rope_coords
+
+        # legacy path
 
         tokens_global = (
             torch.permute(tokens_global, [1, 0, 2])
