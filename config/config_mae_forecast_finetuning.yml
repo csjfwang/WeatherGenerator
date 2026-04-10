@@ -145,8 +145,15 @@ training_config:
     }
 
   model_input: {
+    "mae_random": { enabled: false },
     "forecasting": {
       # masking strategy: "forecast" passes all tokens unmasked as input to the encoder
+      masking_strategy: "forecast",
+      },
+    }
+    
+  target_input: {
+    "forecasting": {
       masking_strategy: "forecast",
       },
     }
