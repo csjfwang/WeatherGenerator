@@ -15,6 +15,8 @@
 #
 # Frozen module regex: ".*encoder.*|.*latent_pre_norm.*|.*latent_heads.*"
 
+strict_mae_encoder: False
+
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder
 fe_num_blocks: 16
