@@ -154,6 +154,12 @@ training_config:
       },
     }
 
+  target_input: {
+    "forecasting": {
+      masking_strategy: "forecast",
+      },
+    }
+
   forecast:
     time_step: 06:00:00
     num_steps: 3
