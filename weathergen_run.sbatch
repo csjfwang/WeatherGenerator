@@ -79,13 +79,19 @@ export UV_CACHE_DIR=/p/project1/weatherai/uv_cache_shared
 #   --run-id l6rog843_ft_tarot_2022Q4_2023Q3 \
 #   --config config/config_forecasting_finetuning.yml config/tarot_2022Q4_2023Q3_l6rog843.yml 
 
-srun uv run --offline --no-sync train_continue \
-  --from-run-id epiys5z8 \
-  --mini-epoch -1 \
-  --run-id epiys5z8_ft_tarot_2022Q4_2023Q3 \
-  --config config/config_forecasting_finetuning.yml config/tarot_2022Q4_2023Q3_epiys5z8.yml 
+# srun uv run --offline --no-sync train_continue \
+#   --from-run-id epiys5z8_ft_tarot_2022Q4_2023Q3_smlr \
+#   --mini-epoch -1 \
+#   --reuse-run-id 
+#   --config config/config_forecasting_finetuning.yml config/tarot_2022Q4_2023Q3_epiys5z8.yml 
   # --options istep=0 data_loader_rng_seed=42
 
+srun uv run --offline --no-sync train_continue \
+  --from-run-id epiys5z8_ft_tarot_2022Q4_2023Q3 \
+  --mini-epoch -1 \
+  --reuse-run-id 
+  --config config/config_forecasting_finetuning.yml config/tarot_2022Q4_2023Q3_epiys5z8.yml 
+  
 
 # srun uv --offline run train
 
