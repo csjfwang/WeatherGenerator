@@ -1,7 +1,7 @@
 #!/bin/bash -x
 #SBATCH --account=hclimrep
 #SBATCH --job-name=select_tarot_indices
-#SBATCH --time=24:00:00
+#SBATCH --time=2:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
@@ -56,6 +56,22 @@ echo "SELECTED_IDS_OUT=${SELECTED_IDS_OUT}"
 echo "SELECTED_GLOBAL_IDX_OUT=${SELECTED_GLOBAL_IDX_OUT}"
 
 srun --ntasks=1 uv run --offline --no-sync python scripts/select_tarot_indices.py   --candidate "${CANDIDATE_GLOB}"   --target "${TARGET_GLOB}"   --feature grad_projected   --method fixed_size   --ratio 0.2   --dedup-policy mean   --score-block-size 4096   --output "${SELECTED_IDS_OUT}"   --output-global-idx "${SELECTED_GLOBAL_IDX_OUT}"   --global-index-origin 1979-01-01   --global-index-step-hours 6   --save-score-analysis
+
+# save tarot scores matrix to disk
+# srun --ntasks=1 uv run --offline --no-sync python scripts/select_tarot_indices.py \
+#   --candidate "${CANDIDATE_GLOB}" \
+#   --target "${TARGET_GLOB}" \
+#   --feature grad_projected \
+#   --method fixed_size \
+#   --ratio 0.2 \
+#   --dedup-policy mean \
+#   --score-block-size 4096 \
+#   --score-memmap-path "TAROT/${OUTPUT_TAG}_full_score.mmap" \
+#   --output "${SELECTED_IDS_OUT}" \
+#   --output-global-idx "${SELECTED_GLOBAL_IDX_OUT}" \
+#   --global-index-origin 1979-01-01 \
+#   --global-index-step-hours 6 \
+#   --save-score-analysis
 
 rc=$?
 if [ "${rc}" -ne 0 ]; then
