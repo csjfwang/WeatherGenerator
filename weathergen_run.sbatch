@@ -96,7 +96,7 @@ srun uv run --offline --no-sync train_continue \
   --from-run-id he7ut6vx \
   --mini-epoch -1 \
   --run-id he7ut6vx_ft_tarot_2022Q4_2023Q3 \
-  --config config/config_forecasting_finetuning.yml config/tarot_2022Q4_2023Q3_epiys5z8.yml 
+  --config config/config_forecasting_finetuning_matz.yml config/tarot_2022Q4_2023Q3_epiys5z8.yml 
 
 # srun uv --offline run train
 
