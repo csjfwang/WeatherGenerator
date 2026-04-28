@@ -55,7 +55,7 @@ echo "TARGET_GLOB=${TARGET_GLOB}"
 echo "SELECTED_IDS_OUT=${SELECTED_IDS_OUT}"
 echo "SELECTED_GLOBAL_IDX_OUT=${SELECTED_GLOBAL_IDX_OUT}"
 
-srun --ntasks=1 uv run --offline --no-sync python scripts/select_tarot_indices.py   --candidate "${CANDIDATE_GLOB}"   --target "${TARGET_GLOB}"   --feature grad_projected   --method fixed_size   --ratio 0.2   --dedup-policy mean   --score-block-size 4096   --output "${SELECTED_IDS_OUT}"   --output-global-idx "${SELECTED_GLOBAL_IDX_OUT}"   --global-index-origin 1979-01-01   --global-index-step-hours 6   --save-score-analysis
+# srun --ntasks=1 uv run --offline --no-sync python scripts/select_tarot_indices.py   --candidate "${CANDIDATE_GLOB}"   --target "${TARGET_GLOB}"   --feature grad_projected   --method fixed_size   --ratio 0.2   --dedup-policy mean   --score-block-size 4096   --output "${SELECTED_IDS_OUT}"   --output-global-idx "${SELECTED_GLOBAL_IDX_OUT}"   --global-index-origin 1979-01-01   --global-index-step-hours 6   --save-score-analysis
 
 # save tarot scores matrix to disk
 # srun --ntasks=1 uv run --offline --no-sync python scripts/select_tarot_indices.py \
@@ -72,6 +72,20 @@ srun --ntasks=1 uv run --offline --no-sync python scripts/select_tarot_indices.p
 #   --global-index-origin 1979-01-01 \
 #   --global-index-step-hours 6 \
 #   --save-score-analysis
+
+srun --ntasks=1 uv run --offline --no-sync python scripts/select_tarot_indices.py \
+  --candidate "/p/scratch/weatherai/shared_work/results/tarot_feat_cand_grad_l6rog843_s*/tarot_features_chkpt00000_rank0000.npz" \
+  --target "TAROT/teststorms_WJF_target_2023_l6rog843.npz" \
+  --feature grad_projected \
+  --method fixed_size \
+  --ratio 0.073 \
+  --dedup-policy mean \
+  --score-block-size 4096 \
+  --output "TAROT/teststorms_WJF_l6rog843_selected_ids_train_full.npy" \
+  --output-global-idx "TAROT/teststorms_WJF_l6rog843_selected_indices_train_full.npy" \
+  --global-index-origin 1979-01-01 \
+  --global-index-step-hours 6 \
+  --save-score-analysis
 
 rc=$?
 if [ "${rc}" -ne 0 ]; then
