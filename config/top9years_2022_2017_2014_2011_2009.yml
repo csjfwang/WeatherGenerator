@@ -1,0 +1,10 @@
+training_config:
+  random_sampler:
+    method: tarot
+    indices_file: TAROT/top9years_2022_2017_2014_2011_2009_indices.npy
+
+validation_config:
+  random_sampler: full
+
+test_config:
+  random_sampler: full
