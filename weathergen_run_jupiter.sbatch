@@ -73,7 +73,7 @@ source .venv/bin/activate
 export TORCH_LIB=$(python -c "import torch, pathlib; print(pathlib.Path(torch.__file__).parent / 'lib')")
 export LD_LIBRARY_PATH="$TORCH_LIB:$LD_LIBRARY_PATH"
 
-export UV_CACHE_DIR=/p/project1/weatherai/uv_cache_shared
+export UV_CACHE_DIR=/e/scratch/weatherai/uv_cache_shared
 
 # srun uv run --offline --no-sync train_continue --from_run_id r93m2nvw
 # srun uv run --offline --no-sync train_continue \
