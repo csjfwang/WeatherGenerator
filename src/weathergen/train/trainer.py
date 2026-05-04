@@ -365,16 +365,8 @@ class Trainer(TrainerBase):
         if self.world_size_original is None:
             mini_epoch_base = int(self.cf.general.istep / len(self.data_loader))
         else:
-            len_per_rank = (
-                len(self.dataset) // (self.world_size_original * self.batch_size_per_gpu)
-            ) * self.batch_size_per_gpu
-            mini_epoch_base = int(
-                self.cf.general.istep
-                / (
-                    min(len_per_rank, self.training_cfg.samples_per_mini_epoch)
-                    * self.world_size_original
-                )
-            )
+            samples_seen = self.cf.general.istep * self.world_size_original * self.batch_size_per_gpu
+            mini_epoch_base = int(samples_seen / self.training_cfg.samples_per_mini_epoch)
 
         if is_root():
             config.save(self.cf, None)
