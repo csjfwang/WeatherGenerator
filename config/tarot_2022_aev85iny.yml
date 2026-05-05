@@ -1,0 +1,10 @@
+training_config:
+  random_sampler:
+    method: tarot
+    indices_file: TAROT/tarot_2022_aev85iny_selected_indices_train_full.npy
+
+validation_config:
+  random_sampler: full
+
+test_config:
+  random_sampler: full

@@ -1,10 +1,10 @@
 #!/bin/bash -x
-#SBATCH --account=hclimrep
+#SBATCH --account=weatherai
 #SBATCH --job-name=inference_features_44gpu
-#SBATCH --time=1-00:00:00
+#SBATCH --time=12:00:00
 #SBATCH --nodes=11
 #SBATCH --ntasks-per-node=4
-#SBATCH --cpus-per-task=12
+#SBATCH --cpus-per-task=72
 #SBATCH --gres=gpu:4
 #SBATCH --chdir=.
 #SBATCH --partition=booster
@@ -53,7 +53,7 @@ echo "Tasks per Node: ${SLURM_NTASKS_PER_NODE:-4}"
 source .venv/bin/activate
 export TORCH_LIB=$(python -c "import torch, pathlib; print(pathlib.Path(torch.__file__).parent / 'lib')")
 export LD_LIBRARY_PATH="$TORCH_LIB:$LD_LIBRARY_PATH"
-export UV_CACHE_DIR=/p/project1/weatherai/uv_cache_shared
+export UV_CACHE_DIR=/e/scratch/weatherai/uv_cache_shared
 
 set -euo pipefail
 
@@ -113,6 +113,11 @@ run_one_shard() {
         tarot_feature_mode=gradient
         tarot_grad_proj_dim=2048
         tarot_grad_proj_seed=0
+        tarot_grad_wrt=".*forecast_engine.*" 
+        train_logging.terminal=10 
+        train_logging.metrics=20 
+        train_logging.checkpoint=250 
+        train_logging.log_grad_norms=False
   )
   if [ -n "$TAROT_LOSS_CHANNEL_GROUP" ]; then
     cmd+=(tarot_loss_channel_group="$TAROT_LOSS_CHANNEL_GROUP")

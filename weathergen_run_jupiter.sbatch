@@ -115,6 +115,11 @@ export UV_CACHE_DIR=/e/scratch/weatherai/uv_cache_shared
 #   --run-id he7ut6vx_ft_tarot_year_2022 \
 #   --config config/config_forecasting_finetuning_matz.yml config/tarot_2022_l6rog843.yml
 
+srun uv run --offline --no-sync train_continue \
+  --from-run-id he7ut6vx \
+  --mini-epoch -1 \
+  --run-id he7ut6vx_ft_tarot_2022_9stepRef \
+  --config config/config_forecasting_finetuning_matz.yml config/tarot_2022_aev85iny.yml
 
 # srun uv run --offline --no-sync train_continue \
 #   --from-run-id he7ut6vx_ft_tarot_top9year_2 \
@@ -128,10 +133,10 @@ export UV_CACHE_DIR=/e/scratch/weatherai/uv_cache_shared
 #   --reuse-run-id 
 
 
-srun uv run --offline --no-sync train_continue \
-  --from-run-id he7ut6vx_ft_tarot_year_2022 \
-  --mini-epoch 12 \
-  --reuse-run-id 
+# srun uv run --offline --no-sync train_continue \
+#   --from-run-id he7ut6vx_ft_tarot_year_2022 \
+#   --mini-epoch 12 \
+#   --reuse-run-id 
 
 # srun uv --offline run train
 
