@@ -272,6 +272,211 @@ def _shard_local_to_global_idx(
     return offsets[file_id.astype(np.int64)] + idx_local.astype(np.int64)
 
 
+def _infomax_select(
+    cand_feat_norm: np.ndarray,
+    score: np.ndarray,
+    n_select: int,
+    n_neighbor: int = 10,
+    gamma: float = -1.0,
+    mis_ratio: float = 0.0,
+    importance_agg: str = "mean",
+    n_stratas: int = 1,
+    n_importance_iter: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Hybrid InfoMax + D2Pruning coreset selection.
+
+    Implements graph-density sampling from https://arxiv.org/abs/2506.01701 with
+    an optional D2Pruning pre-filter that removes the least relevant candidates.
+
+    Returns (selected_positions, importance_weights) where positions index into the
+    original cand_feat_norm array.
+    """
+    n_cand = cand_feat_norm.shape[0]
+    d = cand_feat_norm.shape[1]
+    if gamma < 0.0:
+        gamma = 1.0 / d
+
+    # Per-candidate importance: aggregate cosine similarity to all targets.
+    if importance_agg == "mean":
+        importance = score.mean(axis=1).astype(np.float64)
+    elif importance_agg == "max":
+        importance = score.max(axis=1).astype(np.float64)
+    else:
+        importance = score.sum(axis=1).astype(np.float64)
+
+    # D2Pruning: discard bottom mis_ratio fraction (least relevant to target distribution).
+    original_indices = np.arange(n_cand, dtype=np.int64)
+    if mis_ratio > 0.0:
+        n_prune = max(1, int(mis_ratio * n_cand))
+        prune_idx = np.argpartition(importance, n_prune)[:n_prune]
+        keep_mask = np.ones(n_cand, dtype=bool)
+        keep_mask[prune_idx] = False
+        original_indices = np.where(keep_mask)[0].astype(np.int64)
+        cand_feat_norm = cand_feat_norm[original_indices]
+        importance = importance[original_indices]
+        print(f"  D2Pruning: removed {n_prune} low-relevance candidates, {len(original_indices)} remain.")
+
+    n_pool = len(original_indices)
+    n_select = min(n_select, n_pool)
+    k = min(n_neighbor, n_pool - 1)
+
+    if n_stratas > 1:
+        return _infomax_stratified(
+            cand_feat_norm, importance, original_indices, n_select, k, gamma, n_stratas,
+            n_importance_iter,
+        )
+
+    return _infomax_graph_select(
+        cand_feat_norm, importance, original_indices, n_select, k, gamma, n_importance_iter
+    )
+
+
+def _build_knn_graph(feat: np.ndarray, k: int, block_size: int = 4096) -> tuple[np.ndarray, np.ndarray]:
+    """k-NN graph via dot product on L2-normalised features (cosine similarity).
+
+    Uses cand @ cand.T in blocks so no O(n²) memory spike.
+    Returns (cosine_distances, nn_indices) where cosine_distance = 1 - cos_sim.
+    """
+    n = feat.shape[0]
+    k = min(k, n - 1)
+    feat_t = torch.from_numpy(feat)          # already L2-normalised
+
+    nn_dists = np.empty((n, k), dtype=np.float32)
+    nn_idxs  = np.empty((n, k), dtype=np.int64)
+
+    for i0 in range(0, n, block_size):
+        i1 = min(i0 + block_size, n)
+        sim = feat_t[i0:i1] @ feat_t.T      # (block, n) cosine similarities
+        dist = 1.0 - sim                     # cosine distance in [0, 2]
+        # Exclude self by setting its distance to a large value before top-k.
+        self_idx = torch.arange(i0, i1, device=dist.device).unsqueeze(1)
+        dist.scatter_(1, self_idx, 2.0)
+        vals, idx = torch.topk(dist, k, largest=False)
+        nn_dists[i0:i1] = vals.float().numpy()
+        nn_idxs[i0:i1]  = idx.numpy()
+
+    return nn_dists, nn_idxs
+
+
+def _graph_density_greedy(
+    feat: np.ndarray,
+    importance: np.ndarray,
+    n_select: int,
+    k: int,
+    gamma: float,
+    n_importance_iter: int = 1,
+) -> np.ndarray:
+    """Greedy InfoMax graph-density selection on a pool of candidates.
+
+    Graph density for node i = Σ_j (1 - exp(-dist(i,j))) * importance[j]
+    After selecting node s, reduce each neighbor j's density by
+    exp(-dist(s,j) * gamma) * density[s] to penalise redundancy.
+
+    n_importance_iter > 1 refines importance scores by propagating graph density
+    back as the importance signal for the next iteration (GCCG-style).
+    """
+    n_pool = feat.shape[0]
+    print(f"    building k={k} NN graph on {n_pool} samples (dim={feat.shape[1]})...")
+    nn_dists, nn_idxs = _build_knn_graph(feat, k)
+
+    epsilon = 1e-7
+    importance = np.maximum(importance.copy(), epsilon)
+    for it in range(n_importance_iter):
+        neighbor_imp = importance[nn_idxs]                     # (n, k)
+        edge_w = (1.0 - np.exp(-nn_dists)) * neighbor_imp     # (n, k)
+        new_importance = edge_w.sum(axis=1).astype(np.float64)
+        max_imp = new_importance.max()
+        if max_imp > 0:
+            new_importance /= max_imp
+        importance = np.maximum(new_importance, epsilon)
+        if n_importance_iter > 1:
+            print(
+                f"    importance iter {it + 1}/{n_importance_iter}: "
+                f"min={importance.min():.4f} max={importance.max():.4f}"
+            )
+
+    neighbor_imp = importance[nn_idxs]                        # (n, k)
+    edge_w = (1.0 - np.exp(-nn_dists)) * neighbor_imp        # (n, k)
+    graph_density = edge_w.sum(axis=1).astype(np.float64)
+
+    available = np.ones(n_pool, dtype=bool)
+    selected = np.empty(n_select, dtype=np.int64)
+
+    for step in range(n_select):
+        sel = int(np.argmax(np.where(available, graph_density, -np.inf)))
+        selected[step] = sel
+        available[sel] = False
+
+        nbs = nn_idxs[sel]
+        decay = np.exp(-nn_dists[sel] * gamma) * graph_density[sel]
+        graph_density[nbs] = np.maximum(0.0, graph_density[nbs] - decay)
+
+    return selected
+
+
+def _infomax_graph_select(
+    feat: np.ndarray,
+    importance: np.ndarray,
+    original_indices: np.ndarray,
+    n_select: int,
+    k: int,
+    gamma: float,
+    n_importance_iter: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    print(f"  InfoMax: selecting {n_select} from {len(original_indices)} candidates...")
+    local_sel = _graph_density_greedy(feat, importance, n_select, k, gamma, n_importance_iter)
+    return original_indices[local_sel], importance[local_sel].astype(np.float32)
+
+
+def _infomax_stratified(
+    feat: np.ndarray,
+    importance: np.ndarray,
+    original_indices: np.ndarray,
+    n_select: int,
+    k: int,
+    gamma: float,
+    n_stratas: int,
+    n_importance_iter: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Stratified InfoMax: divide by importance bins, run graph selection per stratum."""
+    n_pool = len(original_indices)
+    print(
+        f"  InfoMax stratified: {n_stratas} strata, selecting {n_select} from {n_pool} candidates..."
+    )
+
+    # Assign each candidate to a stratum by importance rank.
+    rank = np.argsort(np.argsort(importance))   # rank[i] in [0, n_pool)
+    stratum_id = (rank * n_stratas // n_pool).clip(0, n_stratas - 1)
+
+    # Uniform budget across strata; distribute remainder to top strata.
+    base_budget = n_select // n_stratas
+    remainder = n_select - base_budget * n_stratas
+    budgets = np.full(n_stratas, base_budget, dtype=np.int64)
+    if remainder > 0:
+        budgets[-remainder:] += 1  # give extra slots to highest-importance strata
+
+    all_sel = []
+    all_imp = []
+    for s in range(n_stratas):
+        mask = stratum_id == s
+        if not mask.any():
+            continue
+        pool_idx = np.where(mask)[0]
+        budget = int(budgets[s])
+        if budget <= 0:
+            continue
+        budget = min(budget, len(pool_idx))
+        local_sel = _graph_density_greedy(
+            feat[pool_idx], importance[pool_idx], budget, k, gamma, n_importance_iter
+        )
+        all_sel.append(original_indices[pool_idx[local_sel]])
+        all_imp.append(importance[pool_idx[local_sel]])
+
+    sel_pos = np.concatenate(all_sel).astype(np.int64)
+    sel_imp = np.concatenate(all_imp).astype(np.float32)
+    return sel_pos, sel_imp
+
+
 def _cosine_score_matrix(
     candidate: np.ndarray,
     target: np.ndarray,
@@ -312,8 +517,56 @@ def main():
     parser.add_argument(
         "--method",
         default="fixed_size",
-        choices=["fixed_size", "random", "dsdm", "less", "otm"],
-        help="TAROT selection method.",
+        choices=["fixed_size", "random", "dsdm", "less", "otm", "infomax"],
+        help="Selection method. 'infomax' uses graph-density sampling (InfoMax + optional D2Pruning).",
+    )
+    parser.add_argument(
+        "--infomax-n-neighbor",
+        type=int,
+        default=10,
+        help="[infomax] Number of nearest neighbours for the k-NN graph.",
+    )
+    parser.add_argument(
+        "--infomax-gamma",
+        type=float,
+        default=-1.0,
+        help="[infomax] RBF decay factor for density update. Negative → auto (1/feature_dim).",
+    )
+    parser.add_argument(
+        "--infomax-mis-ratio",
+        type=float,
+        default=0.0,
+        help=(
+            "[infomax] D2Pruning pre-filter ratio in [0, 1). "
+            "Remove this fraction of candidates with the lowest mean cosine score to target before selection."
+        ),
+    )
+    parser.add_argument(
+        "--infomax-importance",
+        default="mean",
+        choices=["mean", "max", "sum"],
+        help="[infomax] How to aggregate per-candidate cosine scores into a single importance value.",
+    )
+    parser.add_argument(
+        "--infomax-stratas",
+        type=int,
+        default=1,
+        help=(
+            "[infomax] Number of importance strata for stratified selection. "
+            "1 = no stratification (pure graph-density greed). "
+            ">1 = divide candidates into this many importance bins and run graph selection per bin."
+        ),
+    )
+    parser.add_argument(
+        "--infomax-importance-iter",
+        type=int,
+        default=1,
+        help=(
+            "[infomax] Number of graph-density propagation iterations to refine importance scores "
+            "before greedy selection. 1 = single pass (original behaviour). "
+            ">1 = iteratively update importance[i] = Σ_j (1-exp(-dist)) * importance[j], "
+            "normalised, so local target-relevance diffuses through the k-NN graph (GCCG-style)."
+        ),
     )
     parser.add_argument(
         "--dedup-policy",
@@ -398,10 +651,17 @@ def main():
         raise ValueError(f"ratio must be in (0, 1], got {args.ratio}")
     if args.score_block_size <= 0:
         raise ValueError("--score-block-size must be > 0")
+    if not (0.0 <= args.infomax_mis_ratio < 1.0):
+        raise ValueError(f"--infomax-mis-ratio must be in [0, 1), got {args.infomax_mis_ratio}")
+    if args.infomax_stratas < 1:
+        raise ValueError(f"--infomax-stratas must be >= 1, got {args.infomax_stratas}")
+    if args.infomax_importance_iter < 1:
+        raise ValueError(f"--infomax-importance-iter must be >= 1, got {args.infomax_importance_iter}")
 
-    tarot_root = pathlib.Path(__file__).resolve().parent.parent / "TAROT"
-    sys.path.insert(0, str(tarot_root))
-    from tarot.data_selector import DataSelector
+    if args.method != "infomax":
+        tarot_root = pathlib.Path(__file__).resolve().parent.parent / "TAROT"
+        sys.path.insert(0, str(tarot_root))
+        from tarot.data_selector import DataSelector
 
     feature_key = f"feat_{args.feature}"
     cand_loaded = _load_rank_files(args.candidate, feature_key, args.id_mode)
@@ -469,20 +729,42 @@ def main():
             block_size=args.score_block_size,
             score_memmap_path=score_memmap_path,
         )
-        cfg = {
-            "device": "cpu",
-            "selection_method": args.method,
-            "selection_ratio": args.ratio,
-            "k_fold_splits": 10,
-            "merge_target_data": False,
-            "data_weighting": False,
-        }
-        selector = DataSelector(cfg)
-        selected_pos, ot_weights = selector.select_data(
-            score, torch.from_numpy(cand_feat_norm), torch.from_numpy(tgt_feat_norm)
-        )
+
+        if args.method == "infomax":
+            n_select = max(1, int(args.ratio * cand_loaded.ids.shape[0]))
+            print(
+                f"InfoMax selection: ratio={args.ratio}, n_select={n_select}, "
+                f"n_neighbor={args.infomax_n_neighbor}, gamma={args.infomax_gamma}, "
+                f"mis_ratio={args.infomax_mis_ratio}, importance={args.infomax_importance}, "
+                f"stratas={args.infomax_stratas}, importance_iter={args.infomax_importance_iter}"
+            )
+            selected_pos, ot_weights = _infomax_select(
+                cand_feat_norm,
+                score,
+                n_select=n_select,
+                n_neighbor=args.infomax_n_neighbor,
+                gamma=args.infomax_gamma,
+                mis_ratio=args.infomax_mis_ratio,
+                importance_agg=args.infomax_importance,
+                n_stratas=args.infomax_stratas,
+                n_importance_iter=args.infomax_importance_iter,
+            )
+        else:
+            cfg = {
+                "device": "cpu",
+                "selection_method": args.method,
+                "selection_ratio": args.ratio,
+                "k_fold_splits": 10,
+                "merge_target_data": False,
+                "data_weighting": False,
+            }
+            selector = DataSelector(cfg)
+            selected_pos, ot_weights = selector.select_data(
+                score, torch.from_numpy(cand_feat_norm), torch.from_numpy(tgt_feat_norm)
+            )
+            ot_weights = np.asarray(ot_weights, dtype=np.float32)
+
         selected_pos = np.asarray(selected_pos, dtype=np.int64)
-        ot_weights = np.asarray(ot_weights, dtype=np.float32)
         selected_ids_raw = cand_loaded.ids[selected_pos]
         selected_ids, unique_pos = np.unique(selected_ids_raw, return_index=True)
         ot_weights = ot_weights[unique_pos]
