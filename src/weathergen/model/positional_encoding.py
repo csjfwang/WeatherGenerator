@@ -259,8 +259,8 @@ def _apply_complex_modulation(
     coeff_imag: torch.Tensor,
     unsqueeze_dim: int,
 ) -> torch.Tensor:
-    coeff_real = coeff_real.unsqueeze(unsqueeze_dim).to(dtype=x.dtype)
-    coeff_imag = coeff_imag.unsqueeze(unsqueeze_dim).to(dtype=x.dtype)
+    coeff_real = coeff_real.unsqueeze(unsqueeze_dim)
+    coeff_imag = coeff_imag.unsqueeze(unsqueeze_dim)
     num_complex = coeff_real.shape[-1]
     max_complex = (x.shape[-1] - (x.shape[-1] % 2)) // 2
     if num_complex > max_complex:
@@ -272,12 +272,17 @@ def _apply_complex_modulation(
     if num_rotary_dims == 0:
         return x
 
-    x_rot = x[..., :num_rotary_dims].reshape(*x.shape[:-1], num_complex, 2)
+    # Compute the modulation in the (float32) coefficient dtype and cast back afterwards;
+    # bf16 has only ~3 significant digits, too coarse for the high-band harmonic profiles.
+    compute_dtype = torch.promote_types(x.dtype, coeff_real.dtype)
+    coeff_real = coeff_real.to(dtype=compute_dtype)
+    coeff_imag = coeff_imag.to(dtype=compute_dtype)
+    x_rot = x[..., :num_rotary_dims].to(compute_dtype).reshape(*x.shape[:-1], num_complex, 2)
     x_real = x_rot[..., 0]
     x_imag = x_rot[..., 1]
     out_real = (x_real * coeff_real) - (x_imag * coeff_imag)
     out_imag = (x_real * coeff_imag) + (x_imag * coeff_real)
-    out = torch.stack((out_real, out_imag), dim=-1).flatten(-2, -1)
+    out = torch.stack((out_real, out_imag), dim=-1).flatten(-2, -1).to(x.dtype)
     if num_rotary_dims < x.shape[-1]:
         out = torch.cat((out, x[..., num_rotary_dims:]), dim=-1)
     return out
@@ -288,6 +293,7 @@ def build_spherical_rope_coeff_tensors(
     band: int,
     num_local_queries: int,
     num_extra_tokens: int,
+    amp_power: float = 1.0,
     device=None,
     dtype=torch.float32,
 ) -> tuple[
@@ -296,9 +302,32 @@ def build_spherical_rope_coeff_tensors(
     tuple[torch.Tensor, torch.Tensor],
     tuple[torch.Tensor, torch.Tensor],
 ]:
-    """Build spherical-RoPE coefficient tensors for cell-level, extra tokens, and packed tokens."""
+    """Build spherical-RoPE coefficient tensors for cell-level, extra tokens, and packed tokens.
+
+    The orthonormal harmonics are rescaled by sqrt(4*pi) so that, at every point omega,
+    mean_m |Y_lm(omega)|^2 = 1 (constant by Unsoeld's theorem). The modulation then preserves
+    the RMS of isotropic q/k vectors and the attention logit scale matches rope_mode none/2d,
+    making a post-modulation q/k norm unnecessary. The extra (register/class) tokens already
+    use unit-magnitude coefficients and are consistent with this convention.
+
+    amp_power (gamma) optionally compresses the per-mode amplitude profile |Y|^gamma (phase
+    kept, per-pixel total energy renormalized to 2l+1). gamma=1 keeps the exact
+    addition-theorem kernel; gamma->0 approaches phase-only (longitude-only) modulation.
+    """
 
     real_maps, imag_maps = _healpy_band_maps(nside, band)
+    # RMS-isometric normalization (4*pi convention); avoid mutating the lru_cached arrays.
+    rms_scale = math.sqrt(4.0 * math.pi)
+    real_maps = real_maps * rms_scale
+    imag_maps = imag_maps * rms_scale
+    if amp_power != 1.0:
+        mag = np.hypot(real_maps, imag_maps)
+        # guard mag==0: 0**0 == 1 would count vanished modes in the energy normalization
+        new_mag = np.where(mag > 0.0, mag**amp_power, 0.0)
+        scale = np.sqrt((2 * band + 1) / np.sum(new_mag**2, axis=-1, keepdims=True))
+        ratio = np.where(mag > 0.0, new_mag * scale / np.where(mag > 0.0, mag, 1.0), 0.0)
+        real_maps = real_maps * ratio
+        imag_maps = imag_maps * ratio
     cell_real = torch.as_tensor(real_maps, device=device, dtype=dtype)
     cell_imag = torch.as_tensor(imag_maps, device=device, dtype=dtype)
 

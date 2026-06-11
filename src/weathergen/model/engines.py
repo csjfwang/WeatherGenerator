@@ -392,6 +392,7 @@ class QueryAggregationEngine(torch.nn.Module):
         self.cf = cf
         self.num_healpix_cells = num_healpix_cells
         rope_mode = get_rope_mode(self.cf)
+        rope_post_norm = self.cf.get("rope_spherical_post_norm", False)
 
         self.ae_aggregation_blocks = torch.nn.ModuleList()
 
@@ -413,6 +414,7 @@ class QueryAggregationEngine(torch.nn.Module):
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
                         rope_mode=rope_mode,
+                        rope_post_norm=rope_post_norm,
                     )
                 )
             else:
@@ -469,6 +471,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
         self.cf = cf
         self.num_healpix_cells = num_healpix_cells
         rope_mode = get_rope_mode(self.cf)
+        rope_post_norm = self.cf.get("rope_spherical_post_norm", False)
 
         self.ae_global_blocks = torch.nn.ModuleList()
 
@@ -490,6 +493,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
                         rope_mode=rope_mode,
+                        rope_post_norm=rope_post_norm,
                     )
                 )
             else:
@@ -507,6 +511,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
                         rope_mode=rope_mode,
+                        rope_post_norm=rope_post_norm,
                     )
                 )
             # MLP block
@@ -558,6 +563,7 @@ class ForecastingEngine(torch.nn.Module):
         self.cf = cf
         self.num_healpix_cells = num_healpix_cells
         rope_mode = get_rope_mode(self.cf)
+        rope_post_norm = self.cf.get("rope_spherical_post_norm", False)
         self.fe_blocks = torch.nn.ModuleList()
 
         global_rate = int(1 / self.cf.forecast_att_dense_rate)
@@ -578,6 +584,7 @@ class ForecastingEngine(torch.nn.Module):
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
                             rope_mode=rope_mode,
+                            rope_post_norm=rope_post_norm,
                         )
                     )
                 else:
@@ -596,6 +603,7 @@ class ForecastingEngine(torch.nn.Module):
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
                             rope_mode=rope_mode,
+                            rope_post_norm=rope_post_norm,
                         )
                     )
                 # Add MLP block

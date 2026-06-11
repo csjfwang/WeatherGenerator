@@ -41,6 +41,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         norm_eps=1e-5,
         attention_dtype=torch.bfloat16,
         rope_mode="none",
+        rope_post_norm=False,
     ):
         super(MultiSelfAttentionHeadVarlen, self).__init__()
 
@@ -50,7 +51,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         self.softcap = softcap
         self.with_residual = with_residual
         self.rope_mode = rope_mode
-        self.rope_post_mod_qk_lnorm = rope_mode == "spherical"
+        self.rope_post_mod_qk_lnorm = rope_mode == "spherical" and rope_post_norm
         if self.rope_post_mod_qk_lnorm:
             assert with_qk_lnorm, "rope_post_mod_qk_lnorm=True requires with_qk_lnorm=True"
 
@@ -234,6 +235,7 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
         norm_eps=1e-5,
         attention_dtype=torch.bfloat16,
         rope_mode="none",
+        rope_post_norm=False,
     ):
         super(MultiSelfAttentionHeadLocal, self).__init__()
 
@@ -242,7 +244,7 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
         self.softcap = softcap
         self.with_residual = with_residual
         self.rope_mode = rope_mode
-        self.rope_post_mod_qk_lnorm = rope_mode == "spherical"
+        self.rope_post_mod_qk_lnorm = rope_mode == "spherical" and rope_post_norm
         if self.rope_post_mod_qk_lnorm:
             assert with_qk_lnorm, "rope_post_mod_qk_lnorm=True requires with_qk_lnorm=True"
 
@@ -557,6 +559,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         norm_eps=1e-5,
         attention_dtype=torch.bfloat16,
         rope_mode="none",
+        rope_post_norm=False,
     ):
         super(MultiSelfAttentionHead, self).__init__()
 
@@ -566,7 +569,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         self.dropout_rate = dropout_rate
         self.with_residual = with_residual
         self.rope_mode = rope_mode
-        self.rope_post_mod_qk_lnorm = rope_mode == "spherical"
+        self.rope_post_mod_qk_lnorm = rope_mode == "spherical" and rope_post_norm
         if self.rope_post_mod_qk_lnorm:
             assert with_qk_lnorm, "rope_post_mod_qk_lnorm=True requires with_qk_lnorm=True"
 
