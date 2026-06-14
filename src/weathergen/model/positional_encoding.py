@@ -272,17 +272,19 @@ def _apply_complex_modulation(
     if num_rotary_dims == 0:
         return x
 
-    # Compute the modulation in the (float32) coefficient dtype and cast back afterwards;
-    # bf16 has only ~3 significant digits, too coarse for the high-band harmonic profiles.
-    compute_dtype = torch.promote_types(x.dtype, coeff_real.dtype)
-    coeff_real = coeff_real.to(dtype=compute_dtype)
-    coeff_imag = coeff_imag.to(dtype=compute_dtype)
-    x_rot = x[..., :num_rotary_dims].to(compute_dtype).reshape(*x.shape[:-1], num_complex, 2)
+    # Cast the coefficients to x's dtype (deterministically, not the buffer's possibly
+    # FSDP-cast dtype): the modulation runs under activation checkpointing, whose recompute
+    # asserts identical tensor dtypes. The accuracy of the coefficients is set at build time
+    # (sqrt(4*pi) normalization in float); the runtime modulation matches the bf16 q/k that
+    # flash attention consumes anyway.
+    coeff_real = coeff_real.to(dtype=x.dtype)
+    coeff_imag = coeff_imag.to(dtype=x.dtype)
+    x_rot = x[..., :num_rotary_dims].reshape(*x.shape[:-1], num_complex, 2)
     x_real = x_rot[..., 0]
     x_imag = x_rot[..., 1]
     out_real = (x_real * coeff_real) - (x_imag * coeff_imag)
     out_imag = (x_real * coeff_imag) + (x_imag * coeff_real)
-    out = torch.stack((out_real, out_imag), dim=-1).flatten(-2, -1).to(x.dtype)
+    out = torch.stack((out_real, out_imag), dim=-1).flatten(-2, -1)
     if num_rotary_dims < x.shape[-1]:
         out = torch.cat((out, x[..., num_rotary_dims:]), dim=-1)
     return out
