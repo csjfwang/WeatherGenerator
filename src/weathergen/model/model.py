@@ -150,17 +150,23 @@ class ModelParams(torch.nn.Module):
             if self.rope_mode == "spherical":
                 rope_spherical_band = get_rope_spherical_band(cf)
                 num_modes = 2 * int(rope_spherical_band) + 1
+                # Deterministic position constants: float32 (bf16 is too coarse for the
+                # harmonic profiles) and non-persistent so checkpoints written under the
+                # previous normalization convention cannot overwrite the recomputed values.
                 self.register_buffer(
                     "rope_spherical_coeffs",
-                    torch.zeros(1, total_tokens, num_modes, 2, dtype=self.dtype),
+                    torch.zeros(1, total_tokens, num_modes, 2, dtype=torch.float32),
+                    persistent=False,
                 )
                 self.register_buffer(
                     "rope_spherical_cell_coeffs",
-                    torch.zeros(self.num_healpix_cells, num_modes, 2, dtype=self.dtype),
+                    torch.zeros(self.num_healpix_cells, num_modes, 2, dtype=torch.float32),
+                    persistent=False,
                 )
                 self.register_buffer(
                     "rope_spherical_extra_coeffs",
-                    torch.zeros(self.num_extra_tokens, num_modes, 2, dtype=self.dtype),
+                    torch.zeros(self.num_extra_tokens, num_modes, 2, dtype=torch.float32),
+                    persistent=False,
                 )
             else:
                 self.rope_spherical_coeffs = None
@@ -258,6 +264,7 @@ class ModelParams(torch.nn.Module):
                     band=band,
                     num_local_queries=cf.ae_local_num_queries,
                     num_extra_tokens=self.num_extra_tokens,
+                    amp_power=cf.get("rope_spherical_amp_power", 1.0),
                     device=self.rope_spherical_coeffs.device,
                     dtype=self.rope_spherical_coeffs.dtype,
                 )

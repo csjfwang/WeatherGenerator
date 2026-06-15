@@ -55,6 +55,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         use_xsa=False,
         with_2d_rope=False,
         rope_mode="none",
+        rope_post_norm=False,
     ):
         super(MultiSelfAttentionHeadVarlen, self).__init__()
 
@@ -66,7 +67,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         self.use_xsa = use_xsa
         self.with_2d_rope = with_2d_rope
         self.rope_mode = rope_mode
-        self.rope_post_mod_qk_lnorm = rope_mode == "spherical"
+        self.rope_post_mod_qk_lnorm = rope_mode == "spherical" and rope_post_norm
         if self.rope_post_mod_qk_lnorm:
             assert with_qk_lnorm, "rope_post_mod_qk_lnorm=True requires with_qk_lnorm=True"
 
@@ -260,6 +261,7 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
         use_xsa=False,
         with_2d_rope=False,
         rope_mode="none",
+        rope_post_norm=False,
     ):
         super(MultiSelfAttentionHeadLocal, self).__init__()
 
@@ -270,7 +272,7 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
         self.use_xsa = use_xsa
         self.with_2d_rope = with_2d_rope
         self.rope_mode = rope_mode
-        self.rope_post_mod_qk_lnorm = rope_mode == "spherical"
+        self.rope_post_mod_qk_lnorm = rope_mode == "spherical" and rope_post_norm
         if self.rope_post_mod_qk_lnorm:
             assert with_qk_lnorm, "rope_post_mod_qk_lnorm=True requires with_qk_lnorm=True"
 
@@ -590,6 +592,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         use_xsa=False,
         with_2d_rope=False,
         rope_mode="none",
+        rope_post_norm=False,
     ):
         super(MultiSelfAttentionHead, self).__init__()
 
@@ -601,7 +604,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         self.use_xsa = use_xsa
         self.with_2d_rope = with_2d_rope
         self.rope_mode = rope_mode
-        self.rope_post_mod_qk_lnorm = rope_mode == "spherical"
+        self.rope_post_mod_qk_lnorm = rope_mode == "spherical" and rope_post_norm
         if self.rope_post_mod_qk_lnorm:
             assert with_qk_lnorm, "rope_post_mod_qk_lnorm=True requires with_qk_lnorm=True"
 
