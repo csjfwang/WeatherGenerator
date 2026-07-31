@@ -1,0 +1,34 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Fine-tuning overlay matching the forecast_release_model fine-tuned runs
+# (kpg2f10t/aev85iny/w53aw67k): 9-step rollout with frozen encoder/decoder,
+# cosine decay, 32 mini-epochs.
+
+general:
+  istep: 0
+
+# freeze everything except the forecast engine
+freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*ERA5.*"
+
+training_config:
+  num_mini_epochs: 32
+
+  learning_rate_scheduling:
+    policy_decay: "cosine"
+
+  model_input:
+    masking:
+      masking_strategy: "forecast"
+
+  forecast:
+    time_step: "06:00:00"
+    offset: 1
+    num_steps: 9
+    policy: "fixed"
