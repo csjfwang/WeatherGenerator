@@ -316,11 +316,13 @@ class EncoderModule(torch.nn.Module):
 
         # TODO: re-enable or remove ae_local_queries_per_cell
         if self.cf.ae_local_queries_per_cell:
-            tokens_global = (self.q_cells + model_params.pe_global).repeat(rs, 1, 1)
+            tokens_global = self.q_cells
         else:
-            num_tokens = self.num_healpix_cells
-            tokens_global = self.q_cells.repeat(num_tokens, 1, 1) + model_params.pe_global
-            tokens_global = tokens_global.repeat(rs, 1, 1)
+            tokens_global = self.q_cells.repeat(self.num_healpix_cells, 1, 1)
+        # pe_global is None when disabled (use_pe_global=False), i.e. RoPE-only positioning
+        if model_params.pe_global is not None:
+            tokens_global = tokens_global + model_params.pe_global
+        tokens_global = tokens_global.repeat(rs, 1, 1)
 
         # apply local assimilation engine and project onto global latent vectors
         tokens_global_unmasked, posteriors = self.assimilate_local_project_chunked(

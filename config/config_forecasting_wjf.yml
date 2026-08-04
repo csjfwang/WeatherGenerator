@@ -78,6 +78,10 @@ rope_spherical_post_norm: False
 # (phase kept, per-pixel energy renormalized), improving conditioning near the poles.
 rope_spherical_amp_power: 1.0
 
+# Additive per-cell positional encoding on the global latent queries. Disabled on this branch
+# so that RoPE (rope_mode) is the only source of positional information in the latent space.
+use_pe_global: False
+
 with_mixed_precision: True
 with_flash_attention: True
 compile_model: False

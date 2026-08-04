@@ -106,13 +106,20 @@ class ModelParams(torch.nn.Module):
             requires_grad=False,
         )
 
-        pe = torch.zeros(
-            self.num_healpix_cells,
-            cf.ae_local_num_queries,
-            cf.ae_global_dim_embed,
-            dtype=self.dtype,
-        )
-        self.pe_global = torch.nn.Parameter(pe, requires_grad=False)
+        # Additive global (per-cell) positional encoding for the latent queries. Can be switched
+        # off (use_pe_global=False) to ablate RoPE as the only source of positional information
+        # in the global latent space.
+        self.use_pe_global = cf.get("use_pe_global", True)
+        if self.use_pe_global:
+            pe = torch.zeros(
+                self.num_healpix_cells,
+                cf.ae_local_num_queries,
+                cf.ae_global_dim_embed,
+                dtype=self.dtype,
+            )
+            self.pe_global = torch.nn.Parameter(pe, requires_grad=False)
+        else:
+            self.pe_global = None
 
         # RoPE coordinates
         self.rope_mode = get_rope_mode(cf, logger)
@@ -274,32 +281,31 @@ class ModelParams(torch.nn.Module):
                     :, offset : offset + packed_imag.shape[1], :, 1
                 ].copy_(packed_imag)
 
-        # pe_global: always initialized. RoPE handles relative position in Q/K, but pe_global
-        # provides per-cell token identity which is critical for masked cells that have no
-        # content from local assimilation. Without it, masked cells are identical and the
-        # teacher representation (evaluated without dropout) collapses to low rank.
-        self.pe_global.data.fill_(0.0)
-        xs = 2.0 * np.pi * torch.arange(0, dim_embed, 2, device=self.pe_global.device) / dim_embed
-        self.pe_global.data[..., 0::2] = 0.5 * torch.sin(
-            torch.outer(8 * torch.arange(cf.ae_local_num_queries, device=self.pe_global.device), xs)
-        )
-        self.pe_global.data[..., 0::2] += (
-            torch.sin(
-                torch.outer(torch.arange(self.num_healpix_cells, device=self.pe_global.device), xs)
+        # pe_global: initialized unless disabled through use_pe_global. RoPE handles relative
+        # position in Q/K, but pe_global provides per-cell token identity which is critical for
+        # masked cells that have no content from local assimilation. Without it, masked cells are
+        # identical and the teacher representation (evaluated without dropout) collapses to low
+        # rank.
+        if self.use_pe_global:
+            self.pe_global.data.fill_(0.0)
+            dev = self.pe_global.device
+            xs = 2.0 * np.pi * torch.arange(0, dim_embed, 2, device=dev) / dim_embed
+            self.pe_global.data[..., 0::2] = 0.5 * torch.sin(
+                torch.outer(8 * torch.arange(cf.ae_local_num_queries, device=dev), xs)
             )
-            .unsqueeze(1)
-            .repeat((1, cf.ae_local_num_queries, 1))
-        )
-        self.pe_global.data[..., 1::2] = 0.5 * torch.cos(
-            torch.outer(8 * torch.arange(cf.ae_local_num_queries, device=self.pe_global.device), xs)
-        )
-        self.pe_global.data[..., 1::2] += (
-            torch.cos(
-                torch.outer(torch.arange(self.num_healpix_cells, device=self.pe_global.device), xs)
+            self.pe_global.data[..., 0::2] += (
+                torch.sin(torch.outer(torch.arange(self.num_healpix_cells, device=dev), xs))
+                .unsqueeze(1)
+                .repeat((1, cf.ae_local_num_queries, 1))
             )
-            .unsqueeze(1)
-            .repeat((1, cf.ae_local_num_queries, 1))
-        )
+            self.pe_global.data[..., 1::2] = 0.5 * torch.cos(
+                torch.outer(8 * torch.arange(cf.ae_local_num_queries, device=dev), xs)
+            )
+            self.pe_global.data[..., 1::2] += (
+                torch.cos(torch.outer(torch.arange(self.num_healpix_cells, device=dev), xs))
+                .unsqueeze(1)
+                .repeat((1, cf.ae_local_num_queries, 1))
+            )
 
         # healpix neighborhood structure
 
