@@ -24,7 +24,7 @@ training_config:
     policy_decay: "cosine"
 
   model_input:
-    masking:
+    forecasting:
       masking_strategy: "forecast"
 
   forecast:
