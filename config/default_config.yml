@@ -67,10 +67,13 @@ num_register_tokens: 0
 healpix_level: 5
 
 # Generalized RoPE selector.
-rope_mode: none  # one of: none, 2d, spherical
+rope_mode: none  # one of: none, 2d, spherical, spherical_unitary
 # Optional spherical harmonic band for spherical RoPE. If null, the model picks one
 # conservative shared band that fits all spherical-RoPE attention modules.
 rope_spherical_band: null
+# Largest Wigner-D band L for spherical_unitary RoPE (bands l=1..L occupy L*(L+2) head
+# dimensions). If null, the largest L fitting the smallest head dimension is used.
+rope_unitary_max_band: null
 # Re-enable the legacy post-modulation q/k norm. With the RMS-isometric (sqrt(4*pi))
 # coefficient normalization the modulation preserves q/k scale, so this is off by default.
 rope_spherical_post_norm: False

@@ -15,6 +15,7 @@ import healpy as hp
 import numpy as np
 import numpy.typing as npt
 import torch
+from scipy.special import lpmv
 
 # Suppress verbose healpy transform messages during spherical RoPE coefficient precomputation.
 logging.getLogger("healpy").setLevel(logging.WARNING)
@@ -230,6 +231,8 @@ def apply_rope(qs, ks, coords, rope_mode, unsqueeze_dim):
         return rotary_pos_emb_2d(qs, ks, coords, unsqueeze_dim=unsqueeze_dim)
     if rope_mode == "spherical":
         return rotary_pos_emb_spherical(qs, ks, coords, unsqueeze_dim=unsqueeze_dim)
+    if rope_mode == "spherical_unitary":
+        return rotary_pos_emb_spherical_unitary(qs, ks, coords, unsqueeze_dim=unsqueeze_dim)
     raise ValueError(f"Unsupported rope_mode={rope_mode}")
 
 
@@ -410,3 +413,215 @@ def _healpy_band_maps(
         imag_maps[:, neg_idx] = sign * imag_map / 2.0
 
     return real_maps, imag_maps
+
+
+####################################################################################################
+# Spherical unitary RoPE: multi-band real Wigner-D rotations.
+#
+# rope_mode "spherical" modulates q/k with one column of the degree-l rotation matrix (the
+# spherical harmonics themselves), which is not norm preserving. Here q/k are instead rotated
+# with the full real orthogonal representation matrices D^l(g_omega), g_omega = R_z(phi) R_y(theta),
+# the exact spherical analogue of the 1D RoPE phases:
+#   - exact isometry (orthogonal matrices), so no normalization is needed at all,
+#   - exact relative-position kernel: q^T D^l(g_r)^T D^l(g_s) k = q^T D^l(g_r^{-1} g_s) k,
+#   - multiple bands l=1..L give a multi-scale kernel, mirroring RoPE's frequency spectrum
+#     (a single band's zonal kernel P_l oscillates; the band mix forms a decaying envelope).
+# The "spherical" coefficients are proportional to the m'=0 column of these matrices
+# (sqrt(2l+1) times it, with the RMS-isometric normalization), so this is a strict
+# generalization. Choosing g_omega fixes a gauge (rotations about omega are a residual
+# freedom); the meridian convention R_z(phi) R_y(theta) is used consistently everywhere.
+
+
+def _real_sph_harm_band(band: int, theta, phi) -> npt.NDArray[np.float64]:
+    """Real orthonormal spherical harmonics of degree l=band, columns ordered m=-l..l.
+
+    Conventions only need to be internally consistent: the Wigner-D matrices are built and
+    applied in this same basis, and all kernel properties are basis independent.
+    """
+    theta = np.asarray(theta, dtype=np.float64).reshape(-1)
+    phi = np.asarray(phi, dtype=np.float64).reshape(-1)
+    ct = np.cos(theta)
+    out = np.zeros((theta.shape[0], 2 * band + 1), dtype=np.float64)
+    for m in range(0, band + 1):
+        # orthonormal normalization; lpmv includes the Condon-Shortley phase
+        log_norm = 0.5 * (
+            math.log((2 * band + 1) / (4.0 * math.pi))
+            + math.lgamma(band - m + 1)
+            - math.lgamma(band + m + 1)
+        )
+        p = lpmv(m, band, ct) * math.exp(log_norm)
+        if m == 0:
+            out[:, band] = p
+        else:
+            out[:, band + m] = math.sqrt(2.0) * p * np.cos(m * phi)
+            out[:, band - m] = math.sqrt(2.0) * p * np.sin(m * phi)
+    return out
+
+
+def _wigner_z_rotation_blocks(band: int, phi) -> npt.NDArray[np.float64]:
+    """Real-basis representation matrices of z-rotations, D^l(R_z(phi)).
+
+    Acting on functions by (T(R) f)(x) = f(R^{-1} x), a z-rotation mixes the (m, -m) pair of
+    real harmonics by a plane rotation with angle m*phi (the classical RoPE block structure).
+    """
+    phi = np.asarray(phi, dtype=np.float64).reshape(-1)
+    num_modes = 2 * band + 1
+    mats = np.zeros((phi.shape[0], num_modes, num_modes), dtype=np.float64)
+    mats[:, band, band] = 1.0
+    for m in range(1, band + 1):
+        c, s = np.cos(m * phi), np.sin(m * phi)
+        mats[:, band + m, band + m] = c
+        mats[:, band - m, band + m] = s
+        mats[:, band + m, band - m] = -s
+        mats[:, band - m, band - m] = c
+    return mats
+
+
+@lru_cache(maxsize=32)
+def _healpix_wigner_band_mats(nside: int, band: int) -> npt.NDArray[np.float64]:
+    """Per-cell real Wigner-D matrices D^l(R_z(phi_c) R_y(theta_c)) on the HEALPix grid.
+
+    The y-rotation factor d^l(theta) is obtained per iso-latitude ring (HEALPix has only
+    4*nside-1 of them) by solving Y_j(R_y(-theta) u_k) = sum_i Y_i(u_k) d_ij on a fixed
+    sample point set u_k; the degree-l space is rotation invariant, so the system is exact,
+    and an SVD projection removes the residual least-squares noise to give an exactly
+    orthogonal matrix. The z-rotation factor is analytic.
+    """
+    num_pixels = hp.nside2npix(nside)
+    theta, phi = hp.pix2ang(nside, np.arange(num_pixels), nest=True)
+
+    # fixed sample directions for the fit, K >> 2l+1 for conditioning
+    sample_nside = 8
+    u = np.stack(hp.pix2vec(sample_nside, np.arange(hp.nside2npix(sample_nside))), axis=-1)
+    theta_u = np.arccos(np.clip(u[:, 2], -1.0, 1.0))
+    phi_u = np.arctan2(u[:, 1], u[:, 0])
+    a = _real_sph_harm_band(band, theta_u, phi_u)
+    pinv_a = np.linalg.pinv(a)
+
+    ring_theta, ring_idx = np.unique(np.round(theta, 12), return_inverse=True)
+    d_rings = np.zeros((ring_theta.shape[0], 2 * band + 1, 2 * band + 1), dtype=np.float64)
+    for r, th in enumerate(ring_theta):
+        ct, st = math.cos(th), math.sin(th)
+        ry_inv = np.array([[ct, 0.0, -st], [0.0, 1.0, 0.0], [st, 0.0, ct]], dtype=np.float64)
+        u_rot = u @ ry_inv.T
+        theta_r = np.arccos(np.clip(u_rot[:, 2], -1.0, 1.0))
+        phi_r = np.arctan2(u_rot[:, 1], u_rot[:, 0])
+        d = pinv_a @ _real_sph_harm_band(band, theta_r, phi_r)
+        w, _, vt = np.linalg.svd(d)
+        d_rings[r] = w @ vt
+    dz = _wigner_z_rotation_blocks(band, phi)
+    return np.einsum("cij,cjk->cik", dz, d_rings[ring_idx])
+
+
+def _max_supported_unitary_band(dim_embed: int, num_heads: int) -> int:
+    head_dim = dim_embed // num_heads
+    # bands l=1..L occupy sum_{l=1}^{L} (2l+1) = L(L+2) head dimensions
+    return max(0, int(math.isqrt(head_dim + 1)) - 1)
+
+
+def get_rope_unitary_bands(cf) -> list[int]:
+    """Bands l=1..L used by spherical_unitary RoPE, fitting the smallest head dimension."""
+    max_band = cf.get("rope_unitary_max_band", None)
+    if max_band is None:
+        candidates = [
+            _max_supported_unitary_band(cf.ae_global_dim_embed, cf.ae_aggregation_num_heads),
+            _max_supported_unitary_band(cf.ae_global_dim_embed, cf.ae_global_num_heads),
+        ]
+        if cf.get("fe_num_blocks", 0) > 0:
+            candidates.append(_max_supported_unitary_band(cf.ae_global_dim_embed, cf.fe_num_heads))
+        max_band = min(candidates)
+    return list(range(1, int(max_band) + 1))
+
+
+def build_spherical_unitary_rope_tensors(
+    nside: int,
+    bands: list[int] | tuple[int, ...],
+    num_local_queries: int,
+    num_extra_tokens: int,
+    device=None,
+    dtype=torch.float32,
+) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+    """Build per-band Wigner-D tensors: (cell_mats, extra_mats, packed_mats).
+
+    cell_mats[i] has shape (num_cells, 2l+1, 2l+1); extra_mats[i] are identities for the
+    register/class tokens; packed_mats[i] interleave extras first and cells second, each
+    repeated num_local_queries times, matching the packed order of rope_spherical_coeffs.
+    """
+    cell_mats, extra_mats, packed_mats = [], [], []
+    for band in bands:
+        mats = torch.as_tensor(_healpix_wigner_band_mats(nside, band), device=device, dtype=dtype)
+        num_modes = mats.shape[-1]
+        extra = (
+            torch.eye(num_modes, device=mats.device, dtype=mats.dtype)
+            .unsqueeze(0)
+            .repeat(max(num_extra_tokens, 0), 1, 1)
+        )
+        packed = torch.cat(
+            (
+                extra.repeat_interleave(num_local_queries, dim=0),
+                mats.repeat_interleave(num_local_queries, dim=0),
+            ),
+            dim=0,
+        )
+        cell_mats.append(mats)
+        extra_mats.append(extra)
+        packed_mats.append(packed)
+    return cell_mats, extra_mats, packed_mats
+
+
+def rotary_pos_emb_spherical_unitary(q, k, band_mats, unsqueeze_dim: int = 1):
+    """Rotate q/k with per-token block-diagonal real Wigner-D matrices (exact isometry)."""
+    return (
+        _apply_band_rotations(q, band_mats, unsqueeze_dim),
+        _apply_band_rotations(k, band_mats, unsqueeze_dim),
+    )
+
+
+def _token_dim_from_layout(x: torch.Tensor, unsqueeze_dim: int) -> int:
+    # The diagonal (spherical) modulation locates the token dimension purely via
+    # broadcasting; these are the three q/k layouts used by the attention classes.
+    if x.dim() == 3 and unsqueeze_dim == 1:
+        return 0  # varlen: (tokens, heads, head_dim)
+    if x.dim() == 4 and unsqueeze_dim == 1:
+        return 2  # local: (batch, heads, tokens, head_dim)
+    if x.dim() == 4 and unsqueeze_dim == 2:
+        return 1  # global/forecast: (batch, tokens, heads, head_dim)
+    raise ValueError(
+        f"Unsupported q/k layout for spherical_unitary RoPE: "
+        f"dim={x.dim()}, unsqueeze_dim={unsqueeze_dim}"
+    )
+
+
+def _apply_band_rotations(x, band_mats, unsqueeze_dim):
+    token_dim = _token_dim_from_layout(x, unsqueeze_dim)
+    num_rotary_dims = sum(mats.shape[-1] for mats in band_mats)
+    if num_rotary_dims > x.shape[-1]:
+        raise ValueError(
+            f"spherical_unitary RoPE requires {num_rotary_dims} head dimensions but only "
+            f"{x.shape[-1]} are available. Reduce rope_unitary_max_band."
+        )
+    offset = 0
+    pieces = []
+    for mats in band_mats:
+        while mats.dim() > 3:
+            mats = mats.squeeze(0)
+        if mats.shape[0] != x.shape[token_dim]:
+            raise ValueError(
+                f"spherical_unitary RoPE token mismatch: {mats.shape[0]} matrices vs "
+                f"{x.shape[token_dim]} tokens (dim {token_dim})."
+            )
+        num_modes = mats.shape[-1]
+        xs = x[..., offset : offset + num_modes]
+        # compute in the (float32) matrix dtype, cast back afterwards
+        compute_dtype = torch.promote_types(x.dtype, mats.dtype)
+        mats_c = mats.to(compute_dtype)
+        xs_c = xs.to(compute_dtype)
+        if token_dim == x.dim() - 2:
+            out = torch.einsum("tij,...tj->...ti", mats_c, xs_c)
+        else:
+            out = torch.einsum("tij,...thj->...thi", mats_c, xs_c)
+        pieces.append(out.to(x.dtype))
+        offset += num_modes
+    if offset < x.shape[-1]:
+        pieces.append(x[..., offset:])
+    return torch.cat(pieces, dim=-1)

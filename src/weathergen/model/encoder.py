@@ -133,11 +133,7 @@ class EncoderModule(torch.nn.Module):
         tokens_global = checkpoint(
             self.ae_global_engine,
             tokens_global,
-            coords=(
-                model_params.rope_spherical_coeffs.unbind(dim=-1)
-                if model_params.rope_spherical_coeffs is not None
-                else model_params.rope_coords
-            ),
+            coords=model_params.rope_packed_data(),
             use_reentrant=False,
         )
 
@@ -227,6 +223,8 @@ class EncoderModule(torch.nn.Module):
         rope_cell_coords=None,
         rope_cell_coeffs=None,
         rope_extra_coeffs=None,
+        rope_cell_band_mats=None,
+        rope_extra_band_mats=None,
     ):
         """
         Aggregation engine on the global latents of unmasked cells
@@ -258,7 +256,18 @@ class EncoderModule(torch.nn.Module):
 
         # Build packed coords matching the interleaved token order
         num_extra = self.num_class_tokens + self.num_register_tokens
-        if rope_cell_coeffs is not None:
+        if rope_cell_band_mats is not None:
+            packed_bands = []
+            for cell_mats, extra_mats in zip(
+                rope_cell_band_mats, rope_extra_band_mats, strict=True
+            ):
+                packed = []
+                for mask_b in cell_mask.flatten(0, 1):
+                    packed.append(extra_mats)
+                    packed.append(cell_mats[mask_b])
+                packed_bands.append(torch.cat(packed, dim=0))
+            packed_coords = tuple(packed_bands)
+        elif rope_cell_coeffs is not None:
             extra_real, extra_imag = rope_extra_coeffs.unbind(dim=-1)
             cell_real, cell_imag = rope_cell_coeffs.unbind(dim=-1)
             packed_real = []
@@ -335,6 +344,8 @@ class EncoderModule(torch.nn.Module):
             rope_cell_coords=model_params.rope_cell_coords,
             rope_cell_coeffs=model_params.rope_spherical_cell_coeffs,
             rope_extra_coeffs=model_params.rope_spherical_extra_coeffs,
+            rope_cell_band_mats=model_params.rope_unitary_cell_data(),
+            rope_extra_band_mats=model_params.rope_unitary_extra_data(),
         )
 
         # final processing

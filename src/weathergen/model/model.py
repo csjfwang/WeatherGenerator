@@ -40,8 +40,10 @@ from weathergen.model.engines import (
 from weathergen.model.layers import MLP, NamedLinear
 from weathergen.model.positional_encoding import (
     build_spherical_rope_coeff_tensors,
+    build_spherical_unitary_rope_tensors,
     get_rope_mode,
     get_rope_spherical_band,
+    get_rope_unitary_bands,
 )
 from weathergen.model.utils import get_num_parameters
 from weathergen.utils.distributed import is_root
@@ -163,12 +165,38 @@ class ModelParams(torch.nn.Module):
                 self.rope_spherical_coeffs = None
                 self.rope_spherical_cell_coeffs = None
                 self.rope_spherical_extra_coeffs = None
+            self.rope_unitary_bands = []
+            if self.rope_mode == "spherical_unitary":
+                self.rope_unitary_bands = get_rope_unitary_bands(cf)
+                for band in self.rope_unitary_bands:
+                    num_modes = 2 * band + 1
+                    # deterministic position constants, float32 and non-persistent
+                    self.register_buffer(
+                        f"rope_unitary_cell_mats_{band}",
+                        torch.zeros(
+                            self.num_healpix_cells, num_modes, num_modes, dtype=torch.float32
+                        ),
+                        persistent=False,
+                    )
+                    self.register_buffer(
+                        f"rope_unitary_extra_mats_{band}",
+                        torch.zeros(
+                            self.num_extra_tokens, num_modes, num_modes, dtype=torch.float32
+                        ),
+                        persistent=False,
+                    )
+                    self.register_buffer(
+                        f"rope_unitary_packed_mats_{band}",
+                        torch.zeros(total_tokens, num_modes, num_modes, dtype=torch.float32),
+                        persistent=False,
+                    )
         else:
             self.rope_coords = None
             self.rope_cell_coords = None
             self.rope_spherical_coeffs = None
             self.rope_spherical_cell_coeffs = None
             self.rope_spherical_extra_coeffs = None
+            self.rope_unitary_bands = []
 
         # HEALPix neighbours
         hlc = self.healpix_level
@@ -188,6 +216,33 @@ class ModelParams(torch.nn.Module):
             torch.ones(self.num_healpix_cells + 1, dtype=torch.int32), requires_grad=False
         )
         self.q_cells_lens.data[0] = 0
+
+    def rope_packed_data(self):
+        """RoPE payload for attention over the packed token sequence (global/forecast)."""
+        if self.rope_spherical_coeffs is not None:
+            return self.rope_spherical_coeffs.unbind(dim=-1)
+        if self.rope_unitary_bands:
+            return tuple(
+                getattr(self, f"rope_unitary_packed_mats_{band}")
+                for band in self.rope_unitary_bands
+            )
+        return self.rope_coords
+
+    def rope_unitary_cell_data(self):
+        """Per-band cell-level Wigner-D matrices, or None outside spherical_unitary mode."""
+        if not self.rope_unitary_bands:
+            return None
+        return tuple(
+            getattr(self, f"rope_unitary_cell_mats_{band}") for band in self.rope_unitary_bands
+        )
+
+    def rope_unitary_extra_data(self):
+        """Per-band extra-token Wigner-D matrices, or None outside spherical_unitary mode."""
+        if not self.rope_unitary_bands:
+            return None
+        return tuple(
+            getattr(self, f"rope_unitary_extra_mats_{band}") for band in self.rope_unitary_bands
+        )
 
     def create(self, cf: Config) -> "ModelParams":
         self.reset_parameters(cf)
@@ -273,6 +328,22 @@ class ModelParams(torch.nn.Module):
                 self.rope_spherical_coeffs.data[
                     :, offset : offset + packed_imag.shape[1], :, 1
                 ].copy_(packed_imag)
+
+            if self.rope_mode == "spherical_unitary":
+                cell_mats, extra_mats, packed_mats = build_spherical_unitary_rope_tensors(
+                    nside=2**self.healpix_level,
+                    bands=tuple(self.rope_unitary_bands),
+                    num_local_queries=cf.ae_local_num_queries,
+                    num_extra_tokens=self.num_extra_tokens,
+                    device=self.rope_coords.device,
+                    dtype=torch.float32,
+                )
+                for band, cell_m, extra_m, packed_m in zip(
+                    self.rope_unitary_bands, cell_mats, extra_mats, packed_mats, strict=True
+                ):
+                    getattr(self, f"rope_unitary_cell_mats_{band}").data.copy_(cell_m)
+                    getattr(self, f"rope_unitary_extra_mats_{band}").data.copy_(extra_m)
+                    getattr(self, f"rope_unitary_packed_mats_{band}").data.copy_(packed_m)
 
         # pe_global: always initialized. RoPE handles relative position in Q/K, but pe_global
         # provides per-cell token identity which is critical for masked cells that have no
@@ -751,11 +822,7 @@ class Model(torch.nn.Module):
         # collapse along input step dimension
         tokens = tokens.reshape(shape).sum(axis=1)
 
-        rope_data = (
-            model_params.rope_spherical_coeffs.unbind(dim=-1)
-            if model_params.rope_spherical_coeffs is not None
-            else model_params.rope_coords
-        )
+        rope_data = model_params.rope_packed_data()
 
         # Allow for pushforward trick
         p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)
