@@ -311,6 +311,7 @@ class ModelParams(torch.nn.Module):
                     num_local_queries=cf.ae_local_num_queries,
                     num_extra_tokens=self.num_extra_tokens,
                     amp_power=cf.get("rope_spherical_amp_power", 1.0),
+                    rms_isometric=cf.get("rope_spherical_rms_isometric", True),
                     device=self.rope_spherical_coeffs.device,
                     dtype=self.rope_spherical_coeffs.dtype,
                 )

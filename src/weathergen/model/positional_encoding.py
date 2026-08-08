@@ -299,6 +299,7 @@ def build_spherical_rope_coeff_tensors(
     num_local_queries: int,
     num_extra_tokens: int,
     amp_power: float = 1.0,
+    rms_isometric: bool = True,
     device=None,
     dtype=torch.float32,
 ) -> tuple[
@@ -322,7 +323,12 @@ def build_spherical_rope_coeff_tensors(
 
     real_maps, imag_maps = _healpy_band_maps(nside, band)
     # RMS-isometric normalization (4*pi convention); avoid mutating the lru_cached arrays.
-    rms_scale = math.sqrt(4.0 * math.pi)
+    # rms_isometric=False keeps the orthonormal-harmonic scale (per-mode RMS 1/sqrt(4*pi)):
+    # the modulated head-dim slice then enters attention ~sqrt(4*pi) weaker relative to the
+    # unmodulated pass-through dims, faithfully reproducing the original post-norm scheme
+    # (PR #2082). Note the constant is NOT absorbed by rope_spherical_post_norm, because it
+    # scales only the rotary slice, not the full head vector the post-norm normalizes over.
+    rms_scale = math.sqrt(4.0 * math.pi) if rms_isometric else 1.0
     real_maps = real_maps * rms_scale
     imag_maps = imag_maps * rms_scale
     if amp_power != 1.0:
