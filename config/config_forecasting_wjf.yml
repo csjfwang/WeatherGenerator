@@ -66,10 +66,20 @@ forecast_att_dense_rate: 1.0
 healpix_level: 5
 
 # Generalized RoPE selector.
-rope_mode: none  # one of: none, 2d, spherical
+rope_mode: none  # one of: none, 2d, spherical, spherical_unitary
 # Optional spherical harmonic band for spherical RoPE. If null, the model picks one
 # conservative shared band that fits all spherical-RoPE attention modules.
 rope_spherical_band: null
+# Largest Wigner-D band L for spherical_unitary RoPE (bands l=1..L occupy L*(L+2) head
+# dimensions). If null, the largest L fitting the smallest head dimension is used.
+rope_unitary_max_band: null
+# Re-enable the legacy post-modulation q/k norm. With the RMS-isometric (sqrt(4*pi))
+# coefficient normalization the modulation preserves q/k scale, so this is off by default.
+rope_spherical_post_norm: False
+# Amplitude-compression exponent gamma for the spherical coefficients. 1.0 keeps the exact
+# addition-theorem kernel; gamma<1 reduces the per-mode amplitude spread across latitudes
+# (phase kept, per-pixel energy renormalized), improving conditioning near the poles.
+rope_spherical_amp_power: 1.0
 
 with_mixed_precision: True
 with_flash_attention: True
@@ -93,7 +103,8 @@ norm_type: "LayerNorm"
 
 #####################################
 
-streams_directory: "./config/streams/era5_1deg_forecasting/"
+# matches the forecast_release_model pretrained runs (l6rog843/epiys5z8/pfp9rmn5)
+streams_directory: "./config/streams/era5_1deg/"
 streams: ???
 
 # type of zarr_store
@@ -139,7 +150,7 @@ training_config:
   # training_mode: "masking", "student_teacher", "latent_loss"
   training_mode: ["masking"]
 
-  num_mini_epochs: 64
+  num_mini_epochs: 96 #256
   samples_per_mini_epoch: 4096
   shuffle: True
 
@@ -205,7 +216,7 @@ validation_config:
   validate_with_ema: 
     enabled : True
     ema_ramp_up_ratio: 0.09
-    ema_halflife_in_thousands: 600
+    ema_halflife_in_thousands: 0.001
 
   # parameters for validation samples that are written to disk
   output : {
@@ -245,7 +256,9 @@ wgtags:
   # This is expected to be the primary tag for comparing experiments in MLFlow, along with the
   # issue number.
   # Expected values are lowercase strings with no spaces, just underscores:
-  # Examples: "rollout_ablation_grid"  
+  # Examples: "rollout_ablation_grid"
+  # reference runs (l6rog843 etc.) used exp: forecast_release_model, issue: 1124;
+  # set your own exp name for the ablation campaign
   exp: null
   # *** Experiment-specific tags ***
   # All extra tags (including lists, dictionaries, etc.) are treated 
