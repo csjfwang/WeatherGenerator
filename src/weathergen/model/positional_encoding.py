@@ -686,18 +686,19 @@ def _apply_band_rotations(x, band_mats, unsqueeze_dim):
             )
         num_modes = mats.shape[-1]
         xs = x[..., offset : offset + num_modes]
-        # Compute in the (float32) matrix dtype and cast back afterwards. Autocast must be
-        # disabled explicitly: einsum is on the autocast lower-precision list, so under the
-        # training autocast region it would silently re-dispatch in bf16 despite the upcast,
-        # defeating the exact-isometry intent of the Wigner-D rotation.
+        # compute in the (float32) matrix dtype, cast back afterwards
+        # NOTE: do not disable autocast around the einsum. Under the training stack the
+        # rope buffers reach the checkpointed forward as FSDP bf16 casts but the backward
+        # recompute reads them as fp32; the ambient autocast normalizes the einsum operands
+        # to bf16 in both passes, which is what keeps the activation-checkpoint recompute
+        # metadata check happy (dtype divergence here raises CheckpointError in training).
         compute_dtype = torch.promote_types(x.dtype, mats.dtype)
         mats_c = mats.to(compute_dtype)
         xs_c = xs.to(compute_dtype)
-        with torch.autocast(device_type=xs_c.device.type, enabled=False):
-            if token_dim == x.dim() - 2:
-                out = torch.einsum("tij,...tj->...ti", mats_c, xs_c)
-            else:
-                out = torch.einsum("tij,...thj->...thi", mats_c, xs_c)
+        if token_dim == x.dim() - 2:
+            out = torch.einsum("tij,...tj->...ti", mats_c, xs_c)
+        else:
+            out = torch.einsum("tij,...thj->...thi", mats_c, xs_c)
         pieces.append(out.to(x.dtype))
         offset += num_modes
     if offset < x.shape[-1]:
