@@ -67,6 +67,12 @@ num_register_tokens: 0
 
 healpix_level: 5
 
+# Absolute per-cell positional embedding added to the global latent queries. Set False
+# to ablate it (does relative RoPE-type information suffice?). Forecast-mode training
+# only: masking-mode training relies on pe_global as the sole identity of masked cells
+# (without it their representations collapse; see ModelParams.reset_parameters).
+pe_global_enable: True
+
 # Generalized RoPE selector.
 rope_mode: none  # one of: none, 2d, spherical, spherical_unitary
 # Optional spherical harmonic band for spherical RoPE. If null, the model picks one

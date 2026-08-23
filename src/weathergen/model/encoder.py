@@ -27,6 +27,50 @@ from weathergen.model.parametrised_prob_dist import LatentInterpolator
 from weathergen.model.positional_encoding import positional_encoding_harmonic
 
 
+def validate_pe_global_config(cf) -> None:
+    """Reject pe_global_enable=False outside forecast-mode training.
+
+    Under masking-style strategies, cells without input tokens have pe_global as their
+    only identity; without it they start from identical q_cells and the representation
+    degrades silently (see the collapse note at the pe_global initialization in
+    ModelParams.reset_parameters). Fail loudly instead.
+
+    TODO: this only inspects the top-level training_config.model_input. A per-stream
+    masking_override (cf.streams[*].masking_override, see masking.py) can still flip a
+    stream to random/healpix masking and would pass this check; extend the validation
+    to the effective per-stream strategies (and add a regression test) before relying
+    on pe_global_enable=False outside plain single-stream forecast configs.
+    """
+    if cf.get("pe_global_enable", True):
+        return
+    model_input = cf.get("training_config", {}).get("model_input", {}) or {}
+    active = [m_cfg for m_cfg in model_input.values() if m_cfg.get("enabled", True)]
+    if not active:
+        raise ValueError(
+            "pe_global_enable=False requires forecast-mode training, but no active "
+            "model_input entries were found to verify this."
+        )
+    strategies = {str(m_cfg.get("masking_strategy")) for m_cfg in active}
+    non_forecast = sorted(strategies - {"forecast"})
+    if non_forecast:
+        raise ValueError(
+            "pe_global_enable=False requires masking_strategy 'forecast' for all "
+            f"active model_input entries; found {non_forecast}. Masked cells rely on "
+            "pe_global as their only identity."
+        )
+
+
+def build_global_latent_queries(cf, q_cells, pe_global, num_healpix_cells, rs):
+    """Initial global latent queries: q_cells replicated per cell, plus the absolute
+    per-cell positional embedding unless pe_global_enable=False (no-global ablation)."""
+    pe = pe_global if cf.get("pe_global_enable", True) else 0.0
+    # TODO: re-enable or remove ae_local_queries_per_cell
+    if cf.ae_local_queries_per_cell:
+        return (q_cells + pe).repeat(rs, 1, 1)
+    tokens_global = q_cells.repeat(num_healpix_cells, 1, 1) + pe
+    return tokens_global.repeat(rs, 1, 1)
+
+
 class EncoderModule(torch.nn.Module):
     name: "EncoderModule"
 
@@ -39,6 +83,7 @@ class EncoderModule(torch.nn.Module):
         :param stream_names: Ordered list of stream identifiers aligned with cf.streams.
         """
         super(EncoderModule, self).__init__()
+        validate_pe_global_config(cf)
         self.cf = cf
 
         self.healpix_level = cf.healpix_level
@@ -323,13 +368,12 @@ class EncoderModule(torch.nn.Module):
         pos_enc = positional_encoding_harmonic
         tokens_global_register_class = pos_enc(self.q_cells.repeat(rs, num_extra_tokens, 1))
 
-        # TODO: re-enable or remove ae_local_queries_per_cell
-        if self.cf.ae_local_queries_per_cell:
-            tokens_global = (self.q_cells + model_params.pe_global).repeat(rs, 1, 1)
-        else:
-            num_tokens = self.num_healpix_cells
-            tokens_global = self.q_cells.repeat(num_tokens, 1, 1) + model_params.pe_global
-            tokens_global = tokens_global.repeat(rs, 1, 1)
+        # pe_global_enable=False drops the absolute per-cell positional embedding from the
+        # global latent queries (ablation: is relative RoPE-type information sufficient?).
+        # Forecast-mode only; enforced by validate_pe_global_config at construction.
+        tokens_global = build_global_latent_queries(
+            self.cf, self.q_cells, model_params.pe_global, self.num_healpix_cells, rs
+        )
 
         # apply local assimilation engine and project onto global latent vectors
         tokens_global_unmasked, posteriors = self.assimilate_local_project_chunked(
